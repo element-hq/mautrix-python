@@ -126,10 +126,10 @@ class AppService(AppServiceServerMixin):
 
     async def start(self, host: str = "127.0.0.1", port: int = 8080) -> None:
         await self.state_store.open()
-        connector = None
+        connector = aiohttp.TCPConnector(limit=1000)
         self.log.debug(f"Starting appservice web server on {host}:{port}")
         if self.server.startswith("https://") and not self.verify_ssl:
-            connector = aiohttp.TCPConnector(verify_ssl=False)
+            connector = aiohttp.TCPConnector(verify_ssl=False, limit=1000)
         default_headers = {"User-Agent": self.default_ua}
         self._http_session = aiohttp.ClientSession(loop=self.loop, connector=connector,
                                                    headers=default_headers)
