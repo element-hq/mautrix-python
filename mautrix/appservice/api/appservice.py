@@ -170,7 +170,8 @@ class AppServiceAPI(HTTPAPI):
                 content: Optional[Union[Dict, bytes, str]] = None, timestamp: Optional[int] = None,
                 headers: Optional[Dict[str, str]] = None,
                 query_params: Optional[Dict[str, Any]] = None,
-                retry_count: Optional[int] = None) -> Awaitable[Dict]:
+                retry_count: Optional[int] = None,
+                **kwargs) -> Awaitable[Dict]:
         """
         Make a raw HTTP request, with optional AppService timestamp massaging and external_url
         setting.
@@ -196,7 +197,7 @@ class AppServiceAPI(HTTPAPI):
         if not self.is_real_user:
             query_params["user_id"] = self.identity or self.bot_mxid
 
-        return super().request(method, path, content, headers, query_params, retry_count)
+        return super().request(method, path, content, headers, query_params, retry_count, **kwargs)
 
 
 class ChildAppServiceAPI(AppServiceAPI):
