@@ -264,7 +264,7 @@ class HTTPAPI:
         while True:
             self._log_request(method, path, content, orig_content, query_params, req_id)
             try:
-                start_time = time.time()
+                start_time = time()
                 outcome = "success"
                 API_CALLS.labels(method=metrics_method).inc()
                 try:
@@ -274,7 +274,7 @@ class HTTPAPI:
                     outcome = "fail"
                     raise
                 finally:
-                    MATRIX_REQUEST_SECONDS.labels(method=metrics_method, outcome=outcome).observe(time.time() - start_time)
+                    MATRIX_REQUEST_SECONDS.labels(method=metrics_method, outcome=outcome).observe(time() - start_time)
             except MatrixRequestError as e:
                 if retry_count > 0 and e.http_status in (502, 503, 504):
                     self.log.warning(f"Request #{req_id} failed with HTTP {e.http_status}, "
