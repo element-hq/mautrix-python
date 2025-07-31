@@ -1,11 +1,12 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import Any, NamedTuple
+import json
 
 from mautrix.types import (
     Member,
@@ -14,9 +15,10 @@ from mautrix.types import (
     PowerLevelStateEventContent,
     RoomEncryptionStateEventContent,
     RoomID,
+    Serializable,
     UserID,
 )
-from mautrix.util.async_db import Database
+from mautrix.util.async_db import Database, Scheme
 
 from ..abstract import StateStore
 from .upgrade import upgrade_table
@@ -80,7 +82,7 @@ class PgStateStore(StateStore):
         memberships: tuple[Membership, ...] = (Membership.JOIN, Membership.INVITE),
     ) -> list[UserID]:
         membership_values = [membership.value for membership in memberships]
-        if self.db.scheme == "postgres":
+        if self.db.scheme in (Scheme.POSTGRES, Scheme.COCKROACH):
             q = "SELECT user_id FROM mx_user_profile WHERE room_id=$1 AND membership=ANY($2)"
             res = await self.db.fetch(q, room_id, membership_values)
         else:
@@ -98,7 +100,7 @@ class PgStateStore(StateStore):
         memberships: tuple[Membership, ...] = (Membership.JOIN, Membership.INVITE),
     ) -> dict[UserID, Member]:
         membership_values = [membership.value for membership in memberships]
-        if self.db.scheme == "postgres":
+        if self.db.scheme in (Scheme.POSTGRES, Scheme.COCKROACH):
             q = (
                 "SELECT user_id, membership, displayname, avatar_url FROM mx_user_profile "
                 "WHERE room_id=$1 AND membership=ANY($2)"
@@ -123,7 +125,7 @@ class PgStateStore(StateStore):
     ) -> list[UserID]:
         not_like = f"{not_prefix}%{not_suffix}"
         membership_values = [membership.value for membership in memberships]
-        if self.db.scheme == "postgres":
+        if self.db.scheme in (Scheme.POSTGRES, Scheme.COCKROACH):
             q = (
                 "SELECT user_id FROM mx_user_profile "
                 "WHERE room_id=$1 AND membership=ANY($2)"
@@ -155,7 +157,7 @@ class PgStateStore(StateStore):
             del_q = "DELETE FROM mx_user_profile WHERE room_id=$1"
             if only_membership is None:
                 await conn.execute(del_q, room_id)
-            elif self.db.scheme == "postgres":
+            elif self.db.scheme in (Scheme.POSTGRES, Scheme.COCKROACH):
                 del_q = f"{del_q} AND (membership=$2 OR user_id = ANY($3))"
                 await conn.execute(del_q, room_id, only_membership.value, list(members.keys()))
             else:
@@ -163,7 +165,7 @@ class PgStateStore(StateStore):
                 del_q = f"{del_q} AND (membership=? OR user_id IN ({member_placeholders}))"
                 await conn.execute(del_q, room_id, only_membership.value, *members.keys())
 
-            if self.db.scheme == "postgres":
+            if self.db.scheme == Scheme.POSTGRES:
                 await conn.copy_records_to_table(
                     "mx_user_profile", records=records, columns=columns
                 )
@@ -212,13 +214,13 @@ class PgStateStore(StateStore):
         return PowerLevelStateEventContent.parse_json(power_levels_json)
 
     async def set_power_levels(
-        self, room_id: RoomID, content: PowerLevelStateEventContent
+        self, room_id: RoomID, content: PowerLevelStateEventContent | dict[str, Any]
     ) -> None:
         await self.db.execute(
             "INSERT INTO mx_room_state (room_id, power_levels) VALUES ($1, $2) "
             "ON CONFLICT (room_id) DO UPDATE SET power_levels=$2",
             room_id,
-            content.json(),
+            json.dumps(content.serialize() if isinstance(content, Serializable) else content),
         )
 
     async def has_encryption_info_cached(self, room_id: RoomID) -> bool:
@@ -242,10 +244,14 @@ class PgStateStore(StateStore):
         return RoomEncryptionStateEventContent.parse_json(row["encryption"])
 
     async def set_encryption_info(
-        self, room_id: RoomID, content: RoomEncryptionStateEventContent
+        self, room_id: RoomID, content: RoomEncryptionStateEventContent | dict[str, Any]
     ) -> None:
         q = (
             "INSERT INTO mx_room_state (room_id, is_encrypted, encryption) VALUES ($1, true, $2) "
             "ON CONFLICT (room_id) DO UPDATE SET is_encrypted=true, encryption=$2"
         )
-        await self.db.execute(q, room_id, content.json())
+        await self.db.execute(
+            q,
+            room_id,
+            json.dumps(content.serialize() if isinstance(content, Serializable) else content),
+        )

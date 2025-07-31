@@ -1,4 +1,4 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -7,6 +7,7 @@ from typing import Optional
 
 from mautrix.errors import MatrixConnectionError, MatrixError, MatrixRequestError
 from mautrix.types import (
+    DeviceIdentity,
     EncryptionAlgorithm,
     EventType,
     ForwardedRoomKeyEventContent,
@@ -15,12 +16,13 @@ from mautrix.types import (
     RoomKeyRequestEventContent,
     RoomKeyWithheldCode,
     RoomKeyWithheldEventContent,
+    SessionID,
     ToDeviceEvent,
+    TrustState,
 )
 
 from .device_lists import DeviceListMachine
 from .encrypt_olm import OlmEncryptionMachine
-from .types import DeviceIdentity, TrustState
 
 
 class RejectKeyShare(MatrixError):
@@ -64,9 +66,7 @@ class KeySharingMachine(OlmEncryptionMachine, DeviceListMachine):
         """
         if device.user_id != self.client.mxid:
             raise RejectKeyShare(
-                f"Rejecting key request from a different user ({device.user_id})",
-                code=RoomKeyWithheldCode.UNAUTHORIZED,
-                reason="This device does not share keys to other users",
+                f"Ignoring key request from a different user ({device.user_id})", code=None
             )
         elif device.device_id == self.client.device_id:
             raise RejectKeyShare("Ignoring key request from ourselves", code=None)
@@ -76,18 +76,12 @@ class KeySharingMachine(OlmEncryptionMachine, DeviceListMachine):
                 code=RoomKeyWithheldCode.BLACKLISTED,
                 reason="You have been blacklisted by this device",
             )
-        elif device.trust == TrustState.VERIFIED:
-            self.log.debug(f"Accepting key request from verified device {device.device_id}")
-            return True
-        elif self.share_to_unverified_devices:
-            self.log.debug(
-                f"Accepting key request from unverified device {device.device_id}, "
-                f"as share_to_unverified_devices is True"
-            )
+        elif await self.resolve_trust(device) >= self.share_keys_min_trust:
+            self.log.debug(f"Accepting key request from trusted device {device.device_id}")
             return True
         else:
             raise RejectKeyShare(
-                f"Rejecting key request from unverified device {device.device_id}",
+                f"Rejecting key request from untrusted device {device.device_id}",
                 code=RoomKeyWithheldCode.UNVERIFIED,
                 reason="You have not been verified by this device",
             )
@@ -168,9 +162,7 @@ class KeySharingMachine(OlmEncryptionMachine, DeviceListMachine):
         if not await self.allow_key_share(device, request):
             return
 
-        sess = await self.crypto_store.get_group_session(
-            request.room_id, request.sender_key, request.session_id
-        )
+        sess = await self.crypto_store.get_group_session(request.room_id, request.session_id)
         if sess is None:
             raise RejectKeyShare(
                 f"Didn't find group session {request.session_id} to forward to "
@@ -183,7 +175,7 @@ class KeySharingMachine(OlmEncryptionMachine, DeviceListMachine):
         forward_content = ForwardedRoomKeyEventContent(
             algorithm=EncryptionAlgorithm.MEGOLM_V1,
             room_id=sess.room_id,
-            session_id=sess.id,
+            session_id=SessionID(sess.id),
             session_key=exported_key,
             sender_key=sess.sender_key,
             forwarding_key_chain=sess.forwarding_chain,

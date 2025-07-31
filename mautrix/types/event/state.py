@@ -1,4 +1,4 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -16,6 +16,11 @@ from .type import EventType, RoomType
 
 
 @dataclass
+class NotificationPowerLevels(SerializableAttrs):
+    room: int = 50
+
+
+@dataclass
 class PowerLevelStateEventContent(SerializableAttrs):
     """The content of a power level event."""
 
@@ -26,6 +31,8 @@ class PowerLevelStateEventContent(SerializableAttrs):
         default=attr.Factory(dict), metadata={"omitempty": False}
     )
     events_default: int = 0
+
+    notifications: NotificationPowerLevels = attr.ib(factory=lambda: NotificationPowerLevels())
 
     state_default: int = 50
 
@@ -74,7 +81,7 @@ class Membership(SerializableEnum):
     The membership state of a user in a room as specified in section `8.4 Room membership`_ of the
     spec.
 
-    .. _8.4 Room membership: https://spec.matrix.org/v1.1/client-server-api/#room-membership
+    .. _8.4 Room membership: https://spec.matrix.org/v1.2/client-server-api/#room-membership
     """
 
     JOIN = "join"
@@ -88,7 +95,7 @@ class Membership(SerializableEnum):
 class MemberStateEventContent(SerializableAttrs):
     """The content of a membership event. `Spec link`_
 
-    .. _Spec link: https://spec.matrix.org/v1.1/client-server-api/#mroommember"""
+    .. _Spec link: https://spec.matrix.org/v1.2/client-server-api/#mroommember"""
 
     membership: Membership = Membership.LEAVE
     avatar_url: ContentURI = None
@@ -109,7 +116,7 @@ class CanonicalAliasStateEventContent(SerializableAttrs):
 
     See also: `m.room.canonical_alias in the spec`_
 
-    .. _m.room.canonical_alias in the spec: https://spec.matrix.org/v1.1/client-server-api/#mroomcanonical_alias
+    .. _m.room.canonical_alias in the spec: https://spec.matrix.org/v1.2/client-server-api/#mroomcanonical_alias
     """
 
     canonical_alias: RoomAlias = attr.ib(default=None, metadata={"json": "alias"})
@@ -137,6 +144,7 @@ class JoinRule(SerializableEnum):
     RESTRICTED = "restricted"
     INVITE = "invite"
     PRIVATE = "private"
+    KNOCK_RESTRICTED = "knock_restricted"
 
 
 class JoinRestrictionType(SerializableEnum):
@@ -250,7 +258,9 @@ class StrippedStateEvent(SerializableAttrs):
         try:
             event_type = EventType.find(data.get("type", None))
             data.get("content", {})["__mautrix_event_type"] = event_type
-            data.get("unsigned", {}).get("prev_content", {})["__mautrix_event_type"] = event_type
+            (data.get("unsigned") or {}).get("prev_content", {})[
+                "__mautrix_event_type"
+            ] = event_type
         except ValueError:
             pass
         return super().deserialize(data)
@@ -297,12 +307,17 @@ class StateEvent(BaseRoomEvent, SerializableAttrs):
         try:
             event_type = EventType.find(data.get("type"), t_class=EventType.Class.STATE)
             data.get("content", {})["__mautrix_event_type"] = event_type
-            if "prev_content" in data and "prev_content" not in data.get("unsigned", {}):
+            if "prev_content" in data and "prev_content" not in (data.get("unsigned") or {}):
+                # This if is a workaround for Conduit being extremely dumb
+                if data.get("unsigned", {}) is None:
+                    data["unsigned"] = {}
                 data.setdefault("unsigned", {})["prev_content"] = data["prev_content"]
             data.get("unsigned", {}).get("prev_content", {})["__mautrix_event_type"] = event_type
         except ValueError:
             return Obj(**data)
-        return super().deserialize(data)
+        evt = super().deserialize(data)
+        evt.type = event_type
+        return evt
 
     @staticmethod
     @deserializer(StateEventContent)

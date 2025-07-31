@@ -1,11 +1,11 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 from __future__ import annotations
 
-from typing import IO
+from typing import IO, Any
 from pathlib import Path
 
 from mautrix.types import (
@@ -55,7 +55,7 @@ class FileStateStore(MemoryStateStore, FileStore):
         self._time_limited_flush()
 
     async def set_encryption_info(
-        self, room_id: RoomID, content: RoomEncryptionStateEventContent
+        self, room_id: RoomID, content: RoomEncryptionStateEventContent | dict[str, Any]
     ) -> None:
         await super().set_encryption_info(room_id, content)
         self._time_limited_flush()

@@ -1,4 +1,4 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -41,7 +41,7 @@ class PushRuleMethods(BaseClientAPI):
         Returns:
             The push rule information.
         """
-        resp = await self.api.request(Method.GET, Path.pushrules[scope][kind][rule_id])
+        resp = await self.api.request(Method.GET, Path.v3.pushrules[scope][kind][rule_id])
         return PushRule.deserialize(resp)
 
     async def set_push_rule(
@@ -81,7 +81,10 @@ class PushRuleMethods(BaseClientAPI):
         if pattern:
             content["pattern"] = pattern
         await self.api.request(
-            Method.PUT, Path.pushrules[scope][kind][rule_id], query_params=query, content=content
+            Method.PUT,
+            Path.v3.pushrules[scope][kind][rule_id],
+            query_params=query,
+            content=content,
         )
 
     async def remove_push_rule(
@@ -97,4 +100,4 @@ class PushRuleMethods(BaseClientAPI):
             kind: The kind of rule.
             rule_id: The identifier of the rule.
         """
-        await self.api.request(Method.DELETE, Path.pushrules[scope][kind][rule_id])
+        await self.api.request(Method.DELETE, Path.v3.pushrules[scope][kind][rule_id])

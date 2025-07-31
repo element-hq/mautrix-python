@@ -1,4 +1,4 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -50,13 +50,13 @@ class MiscModuleMethods(BaseClientAPI):
 
         Args:
             room_id: The ID of the room in which the user is typing.
-            timeout: The length of time in seconds to mark this user as typing.
+            timeout: The length of time in milliseconds to mark this user as typing.
         """
         if timeout > 0:
             content = {"typing": True, "timeout": timeout}
         else:
             content = {"typing": False}
-        await self.api.request(Method.PUT, Path.rooms[room_id].typing[self.mxid], content)
+        await self.api.request(Method.PUT, Path.v3.rooms[room_id].typing[self.mxid], content)
 
     # endregion
     # region 13.5 Receipts
@@ -77,7 +77,7 @@ class MiscModuleMethods(BaseClientAPI):
             event_id: The last event ID to acknowledge.
             receipt_type: The type of receipt to send. Currently only ``m.read`` is supported.
         """
-        await self.api.request(Method.POST, Path.rooms[room_id].receipt[receipt_type][event_id])
+        await self.api.request(Method.POST, Path.v3.rooms[room_id].receipt[receipt_type][event_id])
 
     # endregion
     # region 13.6 Fully read markers
@@ -110,7 +110,7 @@ class MiscModuleMethods(BaseClientAPI):
             content["m.read"] = read_receipt
         if extra_content:
             content.update(extra_content)
-        await self.api.request(Method.POST, Path.rooms[room_id].read_markers, content)
+        await self.api.request(Method.POST, Path.v3.rooms[room_id].read_markers, content)
 
     # endregion
     # region 13.7 Presence
@@ -134,7 +134,7 @@ class MiscModuleMethods(BaseClientAPI):
         }
         if status:
             content["status_msg"] = status
-        await self.api.request(Method.PUT, Path.presence[self.mxid].status, content)
+        await self.api.request(Method.PUT, Path.v3.presence[self.mxid].status, content)
 
     async def get_presence(self, user_id: UserID) -> PresenceEventContent:
         """
@@ -148,7 +148,7 @@ class MiscModuleMethods(BaseClientAPI):
         Returns:
             The presence info of the given user.
         """
-        content = await self.api.request(Method.GET, Path.presence[user_id].status)
+        content = await self.api.request(Method.GET, Path.v3.presence[user_id].status)
         try:
             return PresenceEventContent.deserialize(content)
         except SerializerError:

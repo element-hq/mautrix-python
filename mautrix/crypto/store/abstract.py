@@ -1,23 +1,30 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 from __future__ import annotations
 
+from typing import NamedTuple
 from abc import ABC, abstractmethod
 
 from mautrix.types import (
+    CrossSigner,
+    CrossSigningUsage,
     DeviceID,
+    DeviceIdentity,
     EventID,
     IdentityKey,
     RoomEncryptionStateEventContent,
     RoomID,
     SessionID,
+    SigningKey,
+    TOFUSigningKey,
     UserID,
 )
 
-from .. import DeviceIdentity, InboundGroupSession, OlmAccount, OutboundGroupSession, Session
+from ..account import OlmAccount
+from ..sessions import InboundGroupSession, OutboundGroupSession, Session
 
 
 class StateStore(ABC):
@@ -176,7 +183,7 @@ class CryptoStore(ABC):
 
     @abstractmethod
     async def get_group_session(
-        self, room_id: RoomID, sender_key: IdentityKey, session_id: SessionID
+        self, room_id: RoomID, session_id: SessionID
     ) -> InboundGroupSession | None:
         """
         Get an inbound Megolm group session that was previously inserted with
@@ -184,7 +191,6 @@ class CryptoStore(ABC):
 
         Args:
             room_id: The room ID for which the session was made.
-            sender_key: The curve25519 identity key of the user who made the session.
             session_id: The unique identifier of the session.
 
         Returns:
@@ -192,16 +198,63 @@ class CryptoStore(ABC):
         """
 
     @abstractmethod
-    async def has_group_session(
-        self, room_id: RoomID, sender_key: IdentityKey, session_id: SessionID
-    ) -> bool:
+    async def redact_group_session(
+        self, room_id: RoomID, session_id: SessionID, reason: str
+    ) -> None:
+        """
+        Remove the keys for a specific Megolm group session.
+
+        Args:
+            room_id: The room where the session is.
+            session_id: The session ID to remove.
+            reason: The reason the session is being removed.
+        """
+
+    @abstractmethod
+    async def redact_group_sessions(
+        self, room_id: RoomID | None, sender_key: IdentityKey | None, reason: str
+    ) -> list[SessionID]:
+        """
+        Remove the keys for multiple Megolm group sessions,
+        based on the room ID and/or sender device.
+
+        Args:
+            room_id: The room ID to delete keys from.
+            sender_key: The Olm identity key of the device to delete keys from.
+            reason: The reason why the keys are being deleted.
+
+        Returns:
+            The list of session IDs that were deleted.
+        """
+
+    @abstractmethod
+    async def redact_expired_group_sessions(self) -> list[SessionID]:
+        """
+        Remove all Megolm group sessions where at least twice the maximum age has passed since
+        receiving the keys.
+
+        Returns:
+            The list of session IDs that were deleted.
+        """
+
+    @abstractmethod
+    async def redact_outdated_group_sessions(self) -> list[SessionID]:
+        """
+        Remove all Megolm group sessions which lack the metadata to determine when they should
+        expire.
+
+        Returns:
+            The list of session IDs that were deleted.
+        """
+
+    @abstractmethod
+    async def has_group_session(self, room_id: RoomID, session_id: SessionID) -> bool:
         """
         Check whether or not a specific inbound Megolm session is in the store. This is used before
         importing forwarded keys.
 
         Args:
             room_id: The room ID for which the session was made.
-            sender_key: The curve25519 identity key of the user who made the session.
             session_id: The unique identifier of the session.
 
         Returns:
@@ -361,4 +414,70 @@ class CryptoStore(ABC):
         Returns:
             A filtered version of the input list that only includes users who have had a previous
             call to :meth:`put_devices` (even if the call was with an empty dict).
+        """
+
+    @abstractmethod
+    async def put_cross_signing_key(
+        self, user_id: UserID, usage: CrossSigningUsage, key: SigningKey
+    ) -> None:
+        """
+        Store a single cross-signing key.
+
+        Args:
+            user_id: The user whose cross-signing key is being stored.
+            usage: The type of key being stored.
+            key: The key itself.
+        """
+
+    @abstractmethod
+    async def get_cross_signing_keys(
+        self, user_id: UserID
+    ) -> dict[CrossSigningUsage, TOFUSigningKey]:
+        """
+        Retrieve stored cross-signing keys for a specific user.
+
+        Args:
+            user_id: The user whose cross-signing keys to get.
+
+        Returns:
+            A map from the type of key to a tuple containing the current key and the key that was
+            seen first. If the keys are different, it should be treated as a local TOFU violation.
+        """
+
+    @abstractmethod
+    async def put_signature(
+        self, target: CrossSigner, signer: CrossSigner, signature: str
+    ) -> None:
+        """
+        Store a signature for a given key from a given key.
+
+        Args:
+            target: The user ID and key being signed.
+            signer: The user ID and key who are doing the signing.
+            signature: The signature.
+        """
+
+    @abstractmethod
+    async def is_key_signed_by(self, target: CrossSigner, signer: CrossSigner) -> bool:
+        """
+        Check if a given key is signed by the given signer.
+
+        Args:
+            target: The key to check.
+            signer: The signer who is expected to have signed the key.
+
+        Returns:
+            ``True`` if the database contains a signature for the key, ``False`` otherwise.
+        """
+
+    @abstractmethod
+    async def drop_signatures_by_key(self, signer: CrossSigner) -> int:
+        """
+        Delete signatures made by the given key.
+
+        Args:
+            signer: The key whose signatures to delete.
+
+        Returns:
+            The number of signatures deleted.
         """

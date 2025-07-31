@@ -1,0 +1,64 @@
+# Copyright (c) 2022 Tulir Asokan
+#
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+from typing import Optional
+
+from attr import dataclass
+
+from ..primitive import EventID, RoomID, SessionID
+from ..util import SerializableAttrs, SerializableEnum, field
+from .base import BaseRoomEvent
+from .message import RelatesTo
+
+
+class MessageStatusReason(SerializableEnum):
+    GENERIC_ERROR = "m.event_not_handled"
+    UNSUPPORTED = "com.beeper.unsupported_event"
+    UNDECRYPTABLE = "com.beeper.undecryptable_event"
+    TOO_OLD = "m.event_too_old"
+    NETWORK_ERROR = "m.foreign_network_error"
+    NO_PERMISSION = "m.no_permission"
+
+    @property
+    def checkpoint_status(self):
+        from mautrix.util.message_send_checkpoint import MessageSendCheckpointStatus
+
+        if self == MessageStatusReason.UNSUPPORTED:
+            return MessageSendCheckpointStatus.UNSUPPORTED
+        elif self == MessageStatusReason.TOO_OLD:
+            return MessageSendCheckpointStatus.TIMEOUT
+        return MessageSendCheckpointStatus.PERM_FAILURE
+
+
+class MessageStatus(SerializableEnum):
+    SUCCESS = "SUCCESS"
+    PENDING = "PENDING"
+    RETRIABLE = "FAIL_RETRIABLE"
+    FAIL = "FAIL_PERMANENT"
+
+
+@dataclass(kw_only=True)
+class BeeperMessageStatusEventContent(SerializableAttrs):
+    relates_to: RelatesTo = field(json="m.relates_to")
+    network: str = ""
+    status: Optional[MessageStatus] = None
+
+    reason: Optional[MessageStatusReason] = None
+    error: Optional[str] = None
+    message: Optional[str] = None
+
+    last_retry: Optional[EventID] = None
+
+
+@dataclass
+class BeeperMessageStatusEvent(BaseRoomEvent, SerializableAttrs):
+    content: BeeperMessageStatusEventContent
+
+
+@dataclass
+class BeeperRoomKeyAckEventContent(SerializableAttrs):
+    room_id: RoomID
+    session_id: SessionID
+    first_message_index: int

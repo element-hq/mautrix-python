@@ -106,6 +106,9 @@ class MatrixParser(Generic[T]):
         msg = await self.tag_aware_parse_node(node, ctx)
         return msg.format(self.e.BLOCKQUOTE)
 
+    async def hr_to_fstring(self, node: HTMLNode, ctx: RecursionContext) -> T:
+        return self.fs("---")
+
     async def header_to_fstring(self, node: HTMLNode, ctx: RecursionContext) -> T:
         children = await self.node_to_fstrings(node, ctx)
         length = int(node.tag[1])
@@ -164,7 +167,7 @@ class MatrixParser(Generic[T]):
         return msg.format(self.e.USER_MENTION, user_id=user_id)
 
     async def room_pill_to_fstring(self, msg: T, room_alias: RoomAlias) -> T | None:
-        return msg.format(self.e.ROOM_MENTION, room_alias=room_alias)
+        return None
 
     async def room_id_link_to_fstring(self, msg: T, room_id: RoomID) -> T | None:
         return None
@@ -173,6 +176,9 @@ class MatrixParser(Generic[T]):
         self, msg: T, room: RoomID | RoomAlias, event_id: EventID
     ) -> T | None:
         return None
+
+    async def img_to_fstring(self, node: HTMLNode, ctx: RecursionContext) -> T:
+        return self.fs(node.attrib.get("alt") or node.attrib.get("title") or "")
 
     async def custom_node_to_fstring(self, node: HTMLNode, ctx: RecursionContext) -> T | None:
         return None
@@ -191,6 +197,8 @@ class MatrixParser(Generic[T]):
             return self.fs("")
         elif node.tag == "blockquote":
             return await self.blockquote_to_fstring(node, ctx)
+        elif node.tag == "hr":
+            return await self.hr_to_fstring(node, ctx)
         elif node.tag == "ol":
             return await self.list_to_fstring(node, ctx)
         elif node.tag == "ul":
@@ -203,6 +211,8 @@ class MatrixParser(Generic[T]):
             return await self.basic_format_to_fstring(node, ctx)
         elif node.tag == "a":
             return await self.link_to_fstring(node, ctx)
+        elif node.tag == "img":
+            return await self.img_to_fstring(node, ctx)
         elif node.tag == "p":
             return (await self.tag_aware_parse_node(node, ctx)).append("\n")
         elif node.tag in ("font", "span"):

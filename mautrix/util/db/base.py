@@ -1,4 +1,4 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -23,6 +23,9 @@ class BaseClass:
     """
     Base class for SQLAlchemy models. Provides SQLAlchemy declarative base features and some
     additional utilities.
+
+    .. deprecated:: 0.15.0
+       The :mod:`mautrix.util.async_db` utility is now recommended over SQLAlchemy.
     """
 
     __tablename__: str
@@ -237,4 +240,9 @@ class BaseClass:
 
 @as_declarative()
 class Base(BaseClass):
+    """
+    .. deprecated:: 0.15.0
+       The :mod:`mautrix.util.async_db` utility is now recommended over SQLAlchemy.
+    """
+
     pass

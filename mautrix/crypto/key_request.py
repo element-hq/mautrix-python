@@ -1,4 +1,4 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2023 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -8,6 +8,7 @@ import asyncio
 import uuid
 
 from mautrix.types import (
+    DecryptedOlmEvent,
     DeviceID,
     EncryptionAlgorithm,
     EventType,
@@ -23,7 +24,6 @@ from mautrix.types import (
 
 from .base import BaseOlmMachine
 from .sessions import InboundGroupSession
-from .types import DecryptedOlmEvent
 
 
 class KeyRequestingMachine(BaseOlmMachine):
@@ -114,15 +114,24 @@ class KeyRequestingMachine(BaseOlmMachine):
 
     async def _receive_forwarded_room_key(self, evt: DecryptedOlmEvent) -> None:
         key: ForwardedRoomKeyEventContent = evt.content
-        if await self.crypto_store.has_group_session(key.room_id, key.sender_key, key.session_id):
+        if await self.crypto_store.has_group_session(key.room_id, key.session_id):
             self.log.debug(
                 f"Ignoring received session {key.session_id} from {evt.sender}/"
                 f"{evt.sender_device}, as crypto store says we have it already"
             )
             return
+        if not key.beeper_max_messages or not key.beeper_max_age_ms:
+            await self._fill_encryption_info(key)
         key.forwarding_key_chain.append(evt.sender_key)
         sess = InboundGroupSession.import_session(
-            key.session_key, key.signing_key, key.sender_key, key.room_id, key.forwarding_key_chain
+            key.session_key,
+            key.signing_key,
+            key.sender_key,
+            key.room_id,
+            key.forwarding_key_chain,
+            max_age=key.beeper_max_age_ms,
+            max_messages=key.beeper_max_messages,
+            is_scheduled=key.beeper_is_scheduled,
         )
         if key.session_id != sess.id:
             self.log.warning(

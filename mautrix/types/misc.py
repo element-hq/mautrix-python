@@ -1,15 +1,15 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
-from typing import Dict, List, NamedTuple, NewType
+from typing import List, NamedTuple, NewType, Optional
 from enum import Enum
 
 from attr import dataclass
 import attr
 
-from .event import Event
+from .event import Event, StateEvent
 from .primitive import BatchID, ContentURI, EventID, RoomAlias, RoomID, SyncToken, UserID
 from .util import SerializableAttrs
 
@@ -19,11 +19,14 @@ class DeviceLists(SerializableAttrs):
     changed: List[UserID] = attr.ib(factory=lambda: [])
     left: List[UserID] = attr.ib(factory=lambda: [])
 
+    def __bool__(self) -> bool:
+        return bool(self.changed or self.left)
+
 
 @dataclass
 class DeviceOTKCount(SerializableAttrs):
-    curve25519: int
-    signed_curve25519: int
+    signed_curve25519: int = 0
+    curve25519: int = 0
 
 
 class RoomCreatePreset(Enum):
@@ -31,7 +34,7 @@ class RoomCreatePreset(Enum):
     Room creation preset, as specified in the `createRoom endpoint`_
 
     .. _createRoom endpoint:
-        https://spec.matrix.org/v1.1/client-server-api/#post_matrixclientv3createroom
+        https://spec.matrix.org/v1.2/client-server-api/#post_matrixclientv3createroom
     """
 
     PRIVATE = "private_chat"
@@ -44,7 +47,7 @@ class RoomDirectoryVisibility(Enum):
     Room directory visibility, as specified in the `createRoom endpoint`_
 
     .. _createRoom endpoint:
-        https://spec.matrix.org/v1.1/client-server-api/#post_matrixclientv3createroom
+        https://spec.matrix.org/v1.2/client-server-api/#post_matrixclientv3createroom
     """
 
     PRIVATE = "private"
@@ -64,7 +67,7 @@ class RoomAliasInfo(SerializableAttrs):
     Room alias query result, as specified in the `alias resolve endpoint`_
 
     .. _alias resolve endpoint:
-        https://spec.matrix.org/v1.1/client-server-api/#get_matrixclientv3directoryroomroomalias
+        https://spec.matrix.org/v1.2/client-server-api/#get_matrixclientv3directoryroomroomalias
     """
 
     room_id: RoomID = None
@@ -84,7 +87,7 @@ class PublicRoomInfo(SerializableAttrs):
     num_joined_members: int
 
     world_readable: bool
-    guests_can_join: bool
+    guest_can_join: bool
 
     name: str = None
     topic: str = None
@@ -108,9 +111,13 @@ PaginatedMessages = NamedTuple(
 
 
 @dataclass
-class VersionsResponse(SerializableAttrs):
-    versions: List[str]
-    unstable_features: Dict[str, bool] = attr.ib(factory=lambda: {})
+class EventContext(SerializableAttrs):
+    end: SyncToken
+    start: SyncToken
+    event: Event
+    events_after: List[Event]
+    events_before: List[Event]
+    state: List[StateEvent]
 
 
 @dataclass
@@ -120,6 +127,10 @@ class BatchSendResponse(SerializableAttrs):
 
     insertion_event_id: EventID
     batch_event_id: EventID
-    base_insertion_event_id: EventID
-
     next_batch_id: BatchID
+    base_insertion_event_id: Optional[EventID] = None
+
+
+@dataclass
+class BeeperBatchSendResponse(SerializableAttrs):
+    event_ids: List[EventID]

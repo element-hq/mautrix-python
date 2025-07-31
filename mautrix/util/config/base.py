@@ -1,4 +1,4 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from ruamel.yaml.comments import CommentedMap
+from ruamel.yaml.comments import Comment, CommentedBase, CommentedMap
 
 from .recursive_dict import RecursiveDict
 
@@ -25,7 +25,12 @@ class ConfigUpdateHelper:
 
     def copy(self, from_path: str, to_path: str | None = None) -> None:
         if from_path in self.source:
-            self.base[to_path or from_path] = self.source[from_path]
+            val = self.source[from_path]
+            # Small hack to make sure comments from the user config don't
+            # partially leak into the updated version.
+            if isinstance(val, CommentedBase):
+                setattr(val, Comment.attrib, Comment())
+            self.base[to_path or from_path] = val
 
     def copy_dict(
         self,

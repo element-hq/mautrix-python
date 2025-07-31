@@ -1,9 +1,9 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
-from typing import Any, Dict, List, Optional, Pattern, Union
+from typing import Dict, List, Optional, Pattern, Union
 from html import escape
 import re
 
@@ -11,7 +11,7 @@ from attr import dataclass
 import attr
 
 from ..primitive import JSON, ContentURI, EventID
-from ..util import ExtensibleEnum, Obj, Serializable, SerializableAttrs, deserializer, field
+from ..util import ExtensibleEnum, Obj, SerializableAttrs, deserializer, field
 from .base import BaseRoomEvent, BaseUnsigned
 
 # region Message types
@@ -54,90 +54,35 @@ class MessageType(ExtensibleEnum):
 # region Relations
 
 
-class InReplyTo:
-    def __init__(
-        self, event_id: Optional[EventID] = None, proxy_target: Optional["RelatesTo"] = None
-    ) -> None:
-        self._event_id = event_id
-        self._proxy_target = proxy_target
-
-    @property
-    def event_id(self) -> EventID:
-        if self._proxy_target:
-            return self._proxy_target.event_id
-        return self._event_id
-
-    @event_id.setter
-    def event_id(self, event_id: EventID) -> None:
-        if self._proxy_target:
-            self._proxy_target.rel_type = RelationType.REPLY
-            self._proxy_target.event_id = event_id
-        else:
-            self._event_id = event_id
+@dataclass
+class InReplyTo(SerializableAttrs):
+    event_id: EventID
 
 
 class RelationType(ExtensibleEnum):
     ANNOTATION: "RelationType" = "m.annotation"
     REFERENCE: "RelationType" = "m.reference"
     REPLACE: "RelationType" = "m.replace"
-    REPLY: "RelationType" = "net.maunium.reply"
+    THREAD: "RelationType" = "m.thread"
 
 
 @dataclass
-class RelatesTo(Serializable):
+class RelatesTo(SerializableAttrs):
     """Message relations. Used for reactions, edits and replies."""
 
     rel_type: RelationType = None
     event_id: Optional[EventID] = None
     key: Optional[str] = None
-    _extra: Dict[str, Any] = attr.ib(factory=lambda: {})
+    is_falling_back: Optional[bool] = None
+    in_reply_to: Optional[InReplyTo] = field(default=None, json="m.in_reply_to")
 
     def __bool__(self) -> bool:
-        return bool(self.rel_type) and bool(self.event_id)
-
-    @classmethod
-    def deserialize(cls, data: JSON) -> Optional["RelatesTo"]:
-        if not data:
-            return None
-        try:
-            return cls(
-                rel_type=RelationType.deserialize(data.pop("rel_type")),
-                event_id=data.pop("event_id", None),
-                key=data.pop("key", None),
-                extra=data,
-            )
-        except KeyError:
-            pass
-        try:
-            return cls(rel_type=RelationType.REPLY, event_id=data["m.in_reply_to"]["event_id"])
-        except KeyError:
-            pass
-        return None
+        return (bool(self.rel_type) and bool(self.event_id)) or bool(self.in_reply_to)
 
     def serialize(self) -> JSON:
         if not self:
             return attr.NOTHING
-        data = {
-            **self._extra,
-            "rel_type": self.rel_type.serialize(),
-        }
-        if self.rel_type == RelationType.REPLY:
-            data["m.in_reply_to"] = {"event_id": self.event_id}
-        if self.event_id:
-            data["event_id"] = self.event_id
-        if self.key:
-            data["key"] = self.key
-        return data
-
-    def __setitem__(self, key: str, value: Any) -> None:
-        if key in ("rel_type", "event_id", "key"):
-            return setattr(self, key, value)
-        self._extra[key] = value
-
-    def __getitem__(self, item: str) -> None:
-        if item in ("rel_type", "event_id", "key"):
-            return getattr(self, item)
-        return self._extra[item]
+        return super().serialize()
 
 
 # endregion
@@ -152,12 +97,40 @@ class BaseMessageEventContentFuncs:
     _relates_to: Optional[RelatesTo]
 
     def set_reply(self, reply_to: Union[EventID, "MessageEvent"], **kwargs) -> None:
-        self.relates_to.rel_type = RelationType.REPLY
-        self.relates_to.event_id = reply_to if isinstance(reply_to, str) else reply_to.event_id
+        self.relates_to.in_reply_to = InReplyTo(
+            event_id=reply_to if isinstance(reply_to, str) else reply_to.event_id
+        )
+
+    def set_thread_parent(
+        self,
+        thread_parent: Union[EventID, "MessageEvent"],
+        last_event_in_thread: Union[EventID, "MessageEvent", None] = None,
+        disable_reply_fallback: bool = False,
+        **kwargs,
+    ) -> None:
+        self.relates_to.rel_type = RelationType.THREAD
+        self.relates_to.event_id = (
+            thread_parent if isinstance(thread_parent, str) else thread_parent.event_id
+        )
+        if isinstance(thread_parent, MessageEvent) and isinstance(
+            thread_parent.content, BaseMessageEventContentFuncs
+        ):
+            self.relates_to.event_id = (
+                thread_parent.content.get_thread_parent() or self.relates_to.event_id
+            )
+        if not disable_reply_fallback:
+            self.set_reply(last_event_in_thread or thread_parent, **kwargs)
+            self.relates_to.is_falling_back = True
 
     def set_edit(self, edits: Union[EventID, "MessageEvent"]) -> None:
         self.relates_to.rel_type = RelationType.REPLACE
         self.relates_to.event_id = edits if isinstance(edits, str) else edits.event_id
+        # Library consumers may create message content by setting a reply first,
+        # then later marking it as an edit. As edits can't change the reply, just remove
+        # the reply metadata when marking as a reply.
+        if self.relates_to.in_reply_to:
+            self.relates_to.in_reply_to = None
+            self.relates_to.is_falling_back = None
 
     def serialize(self) -> JSON:
         data = SerializableAttrs.serialize(self)
@@ -183,12 +156,17 @@ class BaseMessageEventContentFuncs:
         self._relates_to = relates_to
 
     def get_reply_to(self) -> Optional[EventID]:
-        if self._relates_to and self._relates_to.rel_type == RelationType.REPLY:
-            return self._relates_to.event_id
+        if self._relates_to and self._relates_to.in_reply_to:
+            return self._relates_to.in_reply_to.event_id
         return None
 
     def get_edit(self) -> Optional[EventID]:
         if self._relates_to and self._relates_to.rel_type == RelationType.REPLACE:
+            return self._relates_to.event_id
+        return None
+
+    def get_thread_parent(self) -> Optional[EventID]:
+        if self._relates_to and self._relates_to.rel_type == RelationType.THREAD:
             return self._relates_to.event_id
         return None
 
@@ -294,12 +272,60 @@ class LocationInfo(SerializableAttrs):
 
 
 @dataclass
-class MediaMessageEventContent(BaseMessageEventContent, SerializableAttrs):
+class LocationMessageEventContent(BaseMessageEventContent, SerializableAttrs):
+    geo_uri: str = None
+    info: LocationInfo = None
+
+
+html_reply_fallback_regex: Pattern = re.compile(r"^<mx-reply>[\s\S]+</mx-reply>")
+
+
+@dataclass
+class TextMessageEventContent(BaseMessageEventContent, SerializableAttrs):
+    """The content of a text message event (m.text, m.notice, m.emote)"""
+
+    format: Format = None
+    formatted_body: str = None
+
+    def ensure_has_html(self) -> None:
+        if not self.formatted_body or self.format != Format.HTML:
+            self.format = Format.HTML
+            self.formatted_body = escape(self.body).replace("\n", "<br/>")
+
+    def formatted(self, format: Format) -> Optional[str]:
+        if self.format == format:
+            return self.formatted_body
+        return None
+
+    def trim_reply_fallback(self) -> None:
+        if self.get_reply_to() and not getattr(self, "__reply_fallback_trimmed", False):
+            self._trim_reply_fallback_text()
+            self._trim_reply_fallback_html()
+            setattr(self, "__reply_fallback_trimmed", True)
+
+    def _trim_reply_fallback_text(self) -> None:
+        if (
+            not self.body.startswith("> <") and not self.body.startswith("> * <")
+        ) or "\n" not in self.body:
+            return
+        lines = self.body.split("\n")
+        while len(lines) > 0 and lines[0].startswith("> "):
+            lines.pop(0)
+        self.body = "\n".join(lines).strip()
+
+    def _trim_reply_fallback_html(self) -> None:
+        if self.formatted_body and self.format == Format.HTML:
+            self.formatted_body = html_reply_fallback_regex.sub("", self.formatted_body)
+
+
+@dataclass
+class MediaMessageEventContent(TextMessageEventContent, SerializableAttrs):
     """The content of a media message event (m.image, m.audio, m.video, m.file)"""
 
     url: Optional[ContentURI] = None
     info: Optional[MediaInfo] = None
     file: Optional[EncryptedFile] = None
+    filename: Optional[str] = None
 
     @staticmethod
     @deserializer(MediaInfo)
@@ -318,63 +344,6 @@ class MediaMessageEventContent(BaseMessageEventContent, SerializableAttrs):
             return FileInfo.deserialize(data)
         else:
             return Obj(**data)
-
-
-@dataclass
-class LocationMessageEventContent(BaseMessageEventContent, SerializableAttrs):
-    geo_uri: str = None
-    info: LocationInfo = None
-
-
-html_reply_fallback_regex: Pattern = re.compile("^<mx-reply>" r"[\s\S]+?</mx-reply>")
-
-
-@dataclass
-class TextMessageEventContent(BaseMessageEventContent, SerializableAttrs):
-    """The content of a text message event (m.text, m.notice, m.emote)"""
-
-    format: Format = None
-    formatted_body: str = None
-
-    def set_reply(
-        self, reply_to: Union["MessageEvent", EventID], *, displayname: Optional[str] = None
-    ) -> None:
-        super().set_reply(reply_to)
-        if isinstance(reply_to, str):
-            return
-        if not self.formatted_body or len(self.formatted_body) == 0 or self.format != Format.HTML:
-            self.format = Format.HTML
-            self.formatted_body = escape(self.body).replace("\n", "<br/>")
-        if isinstance(reply_to, MessageEvent):
-            self.formatted_body = (
-                reply_to.make_reply_fallback_html(displayname) + self.formatted_body
-            )
-            self.body = reply_to.make_reply_fallback_text(displayname) + self.body
-
-    def formatted(self, format: Format) -> Optional[str]:
-        if self.format == format:
-            return self.formatted_body
-        return None
-
-    def trim_reply_fallback(self) -> None:
-        if self.get_reply_to() and not getattr(self, "__reply_fallback_trimmed", False):
-            self._trim_reply_fallback_text()
-            self._trim_reply_fallback_html()
-            setattr(self, "__reply_fallback_trimmed", True)
-
-    def _trim_reply_fallback_text(self) -> None:
-        if not self.body.startswith("> ") or "\n" not in self.body:
-            return
-        lines = self.body.split("\n")
-        while len(lines) > 0 and lines[0].startswith("> "):
-            lines.pop(0)
-        # Pop extra newline at end of fallback
-        lines.pop(0)
-        self.body = "\n".join(lines)
-
-    def _trim_reply_fallback_html(self) -> None:
-        if self.formatted_body and self.format == Format.HTML:
-            self.formatted_body = html_reply_fallback_regex.sub("", self.formatted_body)
 
 
 MessageEventContent = Union[
@@ -436,36 +405,3 @@ class MessageEvent(BaseRoomEvent, SerializableAttrs):
             return LocationMessageEventContent.deserialize(data)
         else:
             return Obj(**data)
-
-    def make_reply_fallback_html(self, displayname: Optional[str] = None) -> str:
-        """Generate the HTML fallback for messages replying to this event."""
-        if self.content.msgtype.is_text:
-            body = self.content.formatted_body or escape(self.content.body).replace("\n", "<br/>")
-        else:
-            sent_type = media_reply_fallback_body_map[self.content.msgtype] or "a message"
-            body = f"sent {sent_type}"
-        displayname = escape(displayname) if displayname else self.sender
-        return html_reply_fallback_format.format(
-            room_id=self.room_id,
-            event_id=self.event_id,
-            sender=self.sender,
-            displayname=displayname,
-            content=body,
-        )
-
-    def make_reply_fallback_text(self, displayname: Optional[str] = None) -> str:
-        """Generate the plaintext fallback for messages replying to this event."""
-        if self.content.msgtype.is_text:
-            body = self.content.body
-        else:
-            try:
-                body = media_reply_fallback_body_map[self.content.msgtype]
-            except KeyError:
-                body = "an unknown message type"
-        lines = body.strip().split("\n")
-        first_line, lines = lines[0], lines[1:]
-        fallback_text = f"> <{displayname or self.sender}> {first_line}"
-        for line in lines:
-            fallback_text += f"\n> {line}"
-        fallback_text += "\n\n"
-        return fallback_text

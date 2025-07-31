@@ -1,4 +1,4 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -195,6 +195,7 @@ _standard_types = {
         "m.call.hangup": "CALL_HANGUP",
         "m.call.reject": "CALL_REJECT",
         "m.call.negotiate": "CALL_NEGOTIATE",
+        "com.beeper.message_send_status": "BEEPER_MESSAGE_STATUS",
     },
     EventType.Class.EPHEMERAL: {
         "m.receipt": "RECEIPT",
@@ -215,6 +216,7 @@ _standard_types = {
         "m.room_key_request": "ROOM_KEY_REQUEST",
         "m.forwarded_room_key": "FORWARDED_ROOM_KEY",
         "m.dummy": "TO_DEVICE_DUMMY",
+        "com.beeper.room_key.ack": "BEEPER_ROOM_KEY_ACK",
     },
     EventType.Class.UNKNOWN: {
         "__ALL__": "ALL",  # This is not a real event type

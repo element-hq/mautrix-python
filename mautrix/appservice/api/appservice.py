@@ -1,4 +1,4 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -51,6 +51,7 @@ class AppServiceAPI(HTTPAPI):
         client_session: ClientSession = None,
         child: bool = False,
         real_user: bool = False,
+        real_user_as_token: bool = False,
         bridge_name: str | None = None,
         default_retry_count: int = None,
         loop: asyncio.AbstractEventLoop | None = None,
@@ -66,6 +67,7 @@ class AppServiceAPI(HTTPAPI):
             client_session: The aiohttp ClientSession to use.
             child: Whether or not this is instance is a child of another AppServiceAPI.
             real_user: Whether or not this is a real (non-appservice-managed) user.
+            real_user_as_token: Whether this real user is actually using another ``as_token``.
             bridge_name: The name of the bridge to put in the ``fi.mau.double_puppet_source`` field
                 in outgoing message events sent through real users.
         """
@@ -85,6 +87,7 @@ class AppServiceAPI(HTTPAPI):
         self._bot_intent = None
         self.state_store = state_store
         self.is_real_user = real_user
+        self.is_real_user_as_token = real_user_as_token
         self.bridge_name = bridge_name
 
         if not child:
@@ -113,7 +116,9 @@ class AppServiceAPI(HTTPAPI):
             self.children[user] = child
             return child
 
-    def real_user(self, mxid: UserID, token: str, base_url: URL | None = None) -> AppServiceAPI:
+    def real_user(
+        self, mxid: UserID, token: str, base_url: URL | None = None, as_token: bool = False
+    ) -> AppServiceAPI:
         """
         Get the AppServiceAPI for a real (non-appservice-managed) Matrix user.
 
@@ -122,6 +127,8 @@ class AppServiceAPI(HTTPAPI):
             token: The access token for the user.
             base_url: The base URL of the homeserver client-server API to use. Defaults to the
                 appservice homeserver URL.
+            as_token: Whether the token is actually an as_token
+                (meaning the ``user_id`` query parameter needs to be used).
 
         Returns:
             The AppServiceAPI object for the user.
@@ -136,6 +143,7 @@ class AppServiceAPI(HTTPAPI):
             child = self.real_users[mxid]
             child.base_url = base_url or child.base_url
             child.token = token or child.token
+            child.is_real_user_as_token = as_token
         except KeyError:
             child = type(self)(
                 base_url=base_url or self.base_url,
@@ -145,6 +153,7 @@ class AppServiceAPI(HTTPAPI):
                 state_store=self.state_store,
                 client_session=self.session,
                 real_user=True,
+                real_user_as_token=as_token,
                 bridge_name=self.bridge_name,
                 default_retry_count=self.default_retry_count,
             )
@@ -163,7 +172,11 @@ class AppServiceAPI(HTTPAPI):
         return self._bot_intent
 
     def intent(
-        self, user: UserID = None, token: str | None = None, base_url: str | None = None
+        self,
+        user: UserID = None,
+        token: str | None = None,
+        base_url: str | None = None,
+        real_user_as_token: bool = False,
     ) -> as_api.IntentAPI:
         """
         Get the intent API of a child user.
@@ -173,6 +186,8 @@ class AppServiceAPI(HTTPAPI):
             token: The access token to use. Only applicable for non-appservice-managed users.
             base_url: The base URL of the homeserver client-server API to use. Only applicable for
                 non-appservice users. Defaults to the appservice homeserver URL.
+            real_user_as_token: When providing a token, whether it's actually another as_token
+                (meaning the ``user_id`` query parameter needs to be used).
 
         Returns:
             The IntentAPI object for the given user.
@@ -184,7 +199,10 @@ class AppServiceAPI(HTTPAPI):
             raise ValueError("Can't get child intent of real user")
         if token:
             return as_api.IntentAPI(
-                user, self.real_user(user, token, base_url), self.bot_intent(), self.state_store
+                user,
+                self.real_user(user, token, base_url, as_token=real_user_as_token),
+                self.bot_intent(),
+                self.state_store,
             )
         return as_api.IntentAPI(user, self.user(user), self.bot_intent(), self.state_store)
 
@@ -198,31 +216,38 @@ class AppServiceAPI(HTTPAPI):
         query_params: dict[str, Any] | None = None,
         retry_count: int | None = None,
         metrics_method: str | None = "",
+        min_iter_size: int = 25 * 1024 * 1024,
     ) -> Awaitable[dict]:
         """
-        Make a raw HTTP request, with optional AppService timestamp massaging and external_url
-        setting.
+        Make a raw Matrix API request, acting as the appservice user assigned to this AppServiceAPI
+        instance and optionally including timestamp massaging.
 
         Args:
             method: The HTTP method to use.
-            path: The API endpoint to call.
-                Does not include the base path (e.g. /_matrix/client/r0).
-            content: The content to post as a dict (json) or bytes/str (raw).
+            path: The full API endpoint to call (including the _matrix/... prefix)
+            content: The content to post as a dict/list (will be serialized as JSON)
+                     or bytes/str (will be sent as-is).
             timestamp: The timestamp query param used for timestamp massaging.
-            headers: The dict of HTTP headers to send.
-            query_params: The dict of query parameters to send.
+            headers: A dict of HTTP headers to send. If the headers don't contain ``Content-Type``,
+                     it'll be set to ``application/json``. The ``Authorization`` header is always
+                     overridden if :attr:`token` is set.
+            query_params: A dict of query parameters to send.
             retry_count: Number of times to retry if the homeserver isn't reachable.
+                         Defaults to :attr:`default_retry_count`.
             metrics_method: Name of the method to include in Prometheus timing metrics.
+            min_iter_size: If the request body is larger than this value, it will be passed to
+                           aiohttp as an async iterable to stop it from copying the whole thing
+                           in memory.
 
         Returns:
-            The response as a dict.
+            The parsed response JSON.
         """
         query_params = query_params or {}
         if timestamp is not None:
             if isinstance(timestamp, datetime):
                 timestamp = int(timestamp.replace(tzinfo=timezone.utc).timestamp() * 1000)
             query_params["ts"] = timestamp
-        if not self.is_real_user:
+        if not self.is_real_user or self.is_real_user_as_token:
             query_params["user_id"] = self.identity or self.bot_mxid
 
         return super().request(

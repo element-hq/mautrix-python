@@ -1,9 +1,11 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 from __future__ import annotations
+
+from typing import Any
 
 from mautrix.api import Method, Path
 from mautrix.errors import MatrixResponseError, MNotFound
@@ -46,7 +48,7 @@ class UserDataMethods(BaseClientAPI):
         """
         content = await self.api.request(
             Method.POST,
-            Path.user_directory.search,
+            Path.v3.user_directory.search,
             {
                 "search_term": search_query,
                 "limit": limit,
@@ -83,7 +85,7 @@ class UserDataMethods(BaseClientAPI):
             return
         await self.api.request(
             Method.PUT,
-            Path.profile[self.mxid].displayname,
+            Path.v3.profile[self.mxid].displayname,
             {
                 "displayname": displayname,
             },
@@ -102,7 +104,7 @@ class UserDataMethods(BaseClientAPI):
             The display name of the given user.
         """
         try:
-            content = await self.api.request(Method.GET, Path.profile[user_id].displayname)
+            content = await self.api.request(Method.GET, Path.v3.profile[user_id].displayname)
         except MNotFound:
             return None
         try:
@@ -124,7 +126,7 @@ class UserDataMethods(BaseClientAPI):
             return
         await self.api.request(
             Method.PUT,
-            Path.profile[self.mxid].avatar_url,
+            Path.v3.profile[self.mxid].avatar_url,
             {
                 "avatar_url": avatar_url,
             },
@@ -143,7 +145,7 @@ class UserDataMethods(BaseClientAPI):
             The ``mxc://`` URI to the user's avatar.
         """
         try:
-            content = await self.api.request(Method.GET, Path.profile[user_id].avatar_url)
+            content = await self.api.request(Method.GET, Path.v3.profile[user_id].avatar_url)
         except MNotFound:
             return None
         try:
@@ -163,10 +165,23 @@ class UserDataMethods(BaseClientAPI):
         Returns:
             The profile information of the given user.
         """
-        content = await self.api.request(Method.GET, Path.profile[user_id])
+        content = await self.api.request(Method.GET, Path.v3.profile[user_id])
         try:
             return Member.deserialize(content)
         except SerializerError as e:
             raise MatrixResponseError("Invalid member in response") from e
+
+    # endregion
+
+    # region Beeper Custom Fields API
+
+    async def beeper_update_profile(self, custom_fields: dict[str, Any]) -> None:
+        """
+        Set custom fields on the user's profile. Only works on Hungryserv.
+
+        Args:
+            custom_fields: A dictionary of fields to set in the custom content of the profile.
+        """
+        await self.api.request(Method.PATCH, Path.v3.profile[self.mxid], custom_fields)
 
     # endregion

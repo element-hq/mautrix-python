@@ -1,4 +1,4 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -28,7 +28,8 @@ DirectAccountDataEventContent = Dict[UserID, List[RoomID]]
 AccountDataEventContent = Union[RoomTagAccountDataEventContent, DirectAccountDataEventContent, Obj]
 account_data_event_content_map = {
     EventType.TAG: RoomTagAccountDataEventContent,
-    EventType.DIRECT: DirectAccountDataEventContent,
+    # m.direct doesn't really need deserializing
+    # EventType.DIRECT: DirectAccountDataEventContent,
 }
 
 
@@ -42,10 +43,13 @@ class AccountDataEvent(BaseEvent, SerializableAttrs):
     @classmethod
     def deserialize(cls, data: JSON) -> "AccountDataEvent":
         try:
-            data.get("content", {})["__mautrix_event_type"] = EventType.find(data.get("type"))
+            evt_type = EventType.find(data.get("type"))
+            data.get("content", {})["__mautrix_event_type"] = evt_type
         except ValueError:
             return Obj(**data)
-        return super().deserialize(data)
+        evt = super().deserialize(data)
+        evt.type = evt_type
+        return evt
 
     @staticmethod
     @deserializer(AccountDataEventContent)

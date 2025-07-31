@@ -1,4 +1,4 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -32,7 +32,7 @@ ContentURI.__doc__ = """
 A Matrix `content URI`_, used by the content repository.
 
 .. _content URI:
-    https://spec.matrix.org/v1.1/client-server-api/#matrix-content-mxc-uris
+    https://spec.matrix.org/v1.2/client-server-api/#matrix-content-mxc-uris
 """
 
 SyncToken = NewType("SyncToken", str)
@@ -53,3 +53,5 @@ SigningKey = NewType("SigningKey", str)
 SigningKey.__doc__ = "A ed25519 public key as unpadded base64"
 IdentityKey = NewType("IdentityKey", str)
 IdentityKey.__doc__ = "A curve25519 public key as unpadded base64"
+Signature = NewType("Signature", str)
+Signature.__doc__ = "An ed25519 signature as unpadded base64"

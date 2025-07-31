@@ -1,4 +1,4 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -34,7 +34,7 @@ class NotificationDisabler:
 
     @property
     def _path(self) -> PathBuilder:
-        return Path.pushrules["global"].override[
+        return Path.v3.pushrules["global"].override[
             f"net.maunium.silence_while_backfilling:{self.room_id}"
         ]
 

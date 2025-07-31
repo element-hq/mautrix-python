@@ -1,4 +1,4 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -18,6 +18,7 @@ class EventType(Serializable):
         ACCOUNT_DATA = "account_data"
         EPHEMERAL = "ephemeral"
         TO_DEVICE = "to_device"
+
     _by_event_type: ClassVar[dict[str, EventType]]
 
     ROOM_CANONICAL_ALIAS: "EventType"
@@ -50,6 +51,8 @@ class EventType(Serializable):
     CALL_REJECT: "EventType"
     CALL_NEGOTIATE: "EventType"
 
+    BEEPER_MESSAGE_STATUS: "EventType"
+
     RECEIPT: "EventType"
     TYPING: "EventType"
     PRESENCE: "EventType"
@@ -66,6 +69,7 @@ class EventType(Serializable):
     ORG_MATRIX_ROOM_KEY_WITHHELD: "EventType"
     ROOM_KEY_REQUEST: "EventType"
     FORWARDED_ROOM_KEY: "EventType"
+    BEEPER_ROOM_KEY_ACK: "EventType"
 
     ALL: "EventType"
 

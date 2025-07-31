@@ -1,4 +1,4 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -10,6 +10,13 @@ from .account_data import (
     RoomTagInfo,
 )
 from .base import BaseEvent, BaseRoomEvent, BaseUnsigned, GenericEvent
+from .batch import BatchSendEvent, BatchSendStateEvent
+from .beeper import (
+    BeeperMessageStatusEvent,
+    BeeperMessageStatusEventContent,
+    MessageStatus,
+    MessageStatusReason,
+)
 from .encrypted import (
     EncryptedEvent,
     EncryptedEventContent,
@@ -17,6 +24,7 @@ from .encrypted import (
     EncryptedOlmEventContent,
     EncryptionAlgorithm,
     EncryptionKeyAlgorithm,
+    KeyID,
     OlmCiphertext,
     OlmMsgType,
 )
@@ -37,10 +45,12 @@ from .message import (
     AudioInfo,
     BaseFileInfo,
     BaseMessageEventContent,
+    BaseMessageEventContentFuncs,
     EncryptedFile,
     FileInfo,
     Format,
     ImageInfo,
+    InReplyTo,
     JSONWebKey,
     LocationInfo,
     LocationMessageEventContent,
@@ -73,6 +83,7 @@ from .state import (
     RoomPredecessor,
     RoomTombstoneStateEventContent,
     RoomTopicStateEventContent,
+    RoomType,
     SpaceChildStateEventContent,
     SpaceParentStateEventContent,
     StateEvent,
@@ -81,6 +92,7 @@ from .state import (
     StrippedStateEvent,
 )
 from .to_device import (
+    ASToDeviceEvent,
     ForwardedRoomKeyEventContent,
     KeyRequestAction,
     RequestedKeyInfo,

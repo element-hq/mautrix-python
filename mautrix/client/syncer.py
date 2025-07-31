@@ -1,11 +1,11 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable, Type
+from typing import Any, Awaitable, Callable, Type, TypeVar
 from abc import ABC, abstractmethod
 from contextlib import suppress
 from enum import Enum, Flag, auto
@@ -16,6 +16,7 @@ from mautrix.errors import MUnknownToken
 from mautrix.types import (
     JSON,
     AccountDataEvent,
+    BaseMessageEventContentFuncs,
     DeviceLists,
     DeviceOTKCount,
     EphemeralEvent,
@@ -23,21 +24,25 @@ from mautrix.types import (
     EventType,
     Filter,
     FilterID,
+    GenericEvent,
     MessageEvent,
     PresenceState,
+    SerializerError,
     StateEvent,
     StrippedStateEvent,
     SyncToken,
     ToDeviceEvent,
     UserID,
 )
-from mautrix.types.event.message import BaseMessageEventContentFuncs
+from mautrix.util import background_task
 from mautrix.util.logging import TraceLogger
 
 from . import dispatcher
 from .state_store import MemorySyncStore, SyncStore
 
 EventHandler = Callable[[Event], Awaitable[None]]
+
+T = TypeVar("T", bound=Event)
 
 
 class SyncStream(Flag):
@@ -201,7 +206,7 @@ class Syncer(ABC):
         if len(handler_list) == 0 and event_type != EventType.ALL:
             del self.event_handlers[event_type]
 
-    def dispatch_event(self, event: Event, source: SyncStream) -> list[asyncio.Task]:
+    def dispatch_event(self, event: Event | None, source: SyncStream) -> list[asyncio.Task]:
         """
         Send the given event to all applicable event handlers.
 
@@ -209,6 +214,8 @@ class Syncer(ABC):
             event: The event to send.
             source: The sync stream the event was received in.
         """
+        if event is None:
+            return []
         if isinstance(event.content, BaseMessageEventContentFuncs):
             event.content.trim_reply_fallback()
         if getattr(event, "state_key", None) is not None:
@@ -242,9 +249,10 @@ class Syncer(ABC):
             handlers = self.global_event_handlers + handlers
         tasks = []
         for handler, wait_sync in handlers:
-            task = asyncio.create_task(self._catch_errors(handler, data))
             if force_synchronous or wait_sync:
-                tasks.append(task)
+                tasks.append(asyncio.create_task(self._catch_errors(handler, data)))
+            else:
+                background_task.create(self._catch_errors(handler, data))
         return tasks
 
     async def run_internal_event(
@@ -252,7 +260,9 @@ class Syncer(ABC):
     ) -> None:
         kwargs["source"] = SyncStream.INTERNAL
         tasks = self.dispatch_manual_event(
-            event_type, custom_type or kwargs, include_global_handlers=False
+            event_type,
+            custom_type if custom_type is not None else kwargs,
+            include_global_handlers=False,
         )
         await asyncio.gather(*tasks)
 
@@ -261,8 +271,21 @@ class Syncer(ABC):
     ) -> list[asyncio.Task]:
         kwargs["source"] = SyncStream.INTERNAL
         return self.dispatch_manual_event(
-            event_type, custom_type or kwargs, include_global_handlers=False
+            event_type,
+            custom_type if custom_type is not None else kwargs,
+            include_global_handlers=False,
         )
+
+    def _try_deserialize(self, type: Type[T], data: JSON) -> T | GenericEvent:
+        try:
+            return type.deserialize(data)
+        except SerializerError as e:
+            self.log.trace("Deserialization error traceback", exc_info=True)
+            self.log.warning(f"Failed to deserialize {data} into {type.__name__}: {e}")
+            try:
+                return GenericEvent.deserialize(data)
+            except SerializerError:
+                return None
 
     def handle_sync(self, data: JSON) -> list[asyncio.Task]:
         """
@@ -286,21 +309,22 @@ class Syncer(ABC):
         tasks += self.dispatch_internal_event(
             InternalEventType.DEVICE_LISTS,
             custom_type=DeviceLists(
-                changed=device_lists.get("changed", []), left=device_lists.get("left", [])
+                changed=device_lists.get("changed", []),
+                left=device_lists.get("left", []),
             ),
         )
 
         for raw_event in data.get("account_data", {}).get("events", []):
             tasks += self.dispatch_event(
-                AccountDataEvent.deserialize(raw_event), source=SyncStream.ACCOUNT_DATA
+                self._try_deserialize(AccountDataEvent, raw_event), source=SyncStream.ACCOUNT_DATA
             )
         for raw_event in data.get("ephemeral", {}).get("events", []):
             tasks += self.dispatch_event(
-                EphemeralEvent.deserialize(raw_event), source=SyncStream.EPHEMERAL
+                self._try_deserialize(EphemeralEvent, raw_event), source=SyncStream.EPHEMERAL
             )
         for raw_event in data.get("to_device", {}).get("events", []):
             tasks += self.dispatch_event(
-                ToDeviceEvent.deserialize(raw_event), source=SyncStream.TO_DEVICE
+                self._try_deserialize(ToDeviceEvent, raw_event), source=SyncStream.TO_DEVICE
             )
 
         rooms = data.get("rooms", {})
@@ -308,15 +332,22 @@ class Syncer(ABC):
             for raw_event in room_data.get("state", {}).get("events", []):
                 raw_event["room_id"] = room_id
                 tasks += self.dispatch_event(
-                    StateEvent.deserialize(raw_event),
+                    self._try_deserialize(StateEvent, raw_event),
                     source=SyncStream.JOINED_ROOM | SyncStream.STATE,
                 )
 
             for raw_event in room_data.get("timeline", {}).get("events", []):
                 raw_event["room_id"] = room_id
                 tasks += self.dispatch_event(
-                    Event.deserialize(raw_event),
+                    self._try_deserialize(Event, raw_event),
                     source=SyncStream.JOINED_ROOM | SyncStream.TIMELINE,
+                )
+
+            for raw_event in room_data.get("ephemeral", {}).get("events", []):
+                raw_event["room_id"] = room_id
+                tasks += self.dispatch_event(
+                    self._try_deserialize(EphemeralEvent, raw_event),
+                    source=SyncStream.JOINED_ROOM | SyncStream.EPHEMERAL,
                 )
         for room_id, room_data in rooms.get("invite", {}).items():
             events: list[dict[str, JSON]] = room_data.get("invite_state", {}).get("events", [])
@@ -332,9 +363,9 @@ class Syncer(ABC):
             raw_invite.setdefault("event_id", None)
             raw_invite.setdefault("origin_server_ts", int(time.time() * 1000))
 
-            invite = StateEvent.deserialize(raw_invite)
+            invite = self._try_deserialize(StateEvent, raw_invite)
             invite.unsigned.invite_room_state = [
-                StrippedStateEvent.deserialize(raw_event)
+                self._try_deserialize(StrippedStateEvent, raw_event)
                 for raw_event in events
                 if raw_event != raw_invite
             ]
@@ -344,7 +375,7 @@ class Syncer(ABC):
                 if "state_key" in raw_event:
                     raw_event["room_id"] = room_id
                     tasks += self.dispatch_event(
-                        StateEvent.deserialize(raw_event),
+                        self._try_deserialize(StateEvent, raw_event),
                         source=SyncStream.LEFT_ROOM | SyncStream.TIMELINE,
                     )
         return tasks
@@ -388,19 +419,23 @@ class Syncer(ABC):
         self.log.debug("Starting syncing")
         next_batch = await self.sync_store.get_next_batch()
         await self.run_internal_event(InternalEventType.SYNC_STARTED)
+        timeout = 30
         while True:
+            current_batch = next_batch
+            start = time.monotonic()
             try:
                 data = await self.sync(
-                    since=next_batch, filter_id=filter_id, set_presence=self.presence
+                    since=current_batch,
+                    filter_id=filter_id,
+                    set_presence=self.presence,
+                    timeout=timeout * 1000,
                 )
-                if fail_sleep != 5:
-                    self.log.debug("Sync error resolved")
-                fail_sleep = 5
             except (asyncio.CancelledError, MUnknownToken):
                 raise
             except Exception as e:
                 self.log.warning(
-                    f"Sync request errored: {e}, waiting {fail_sleep} seconds before continuing"
+                    f"Sync request errored: {type(e).__name__}: {e}, waiting {fail_sleep}"
+                    " seconds before continuing"
                 )
                 await self.run_internal_event(
                     InternalEventType.SYNC_ERRORED, error=e, sleep_for=fail_sleep
@@ -409,8 +444,15 @@ class Syncer(ABC):
                 if fail_sleep < 320:
                     fail_sleep *= 2
                 continue
+            if fail_sleep != 5:
+                self.log.debug("Sync error resolved")
+            fail_sleep = 5
 
-            is_initial = not next_batch
+            duration = time.monotonic() - start
+            if current_batch and duration > timeout + 10:
+                self.log.warning(f"Sync request ({current_batch}) took {duration:.3f} seconds")
+
+            is_initial = not current_batch
             data["net.maunium.mautrix"] = {
                 "is_initial": is_initial,
                 "is_first": is_first,
@@ -425,16 +467,21 @@ class Syncer(ABC):
                 is_first = False
                 continue
             is_first = False
+            self.log.silly(f"Starting sync handling ({current_batch})")
             start = time.monotonic()
             try:
                 tasks = self.handle_sync(data)
                 await asyncio.gather(*tasks)
             except Exception:
-                self.log.exception("Sync handling errored")
+                self.log.exception(f"Sync handling ({current_batch}) errored")
+            else:
+                self.log.silly(f"Finished sync handling ({current_batch})")
             finally:
                 duration = time.monotonic() - start
                 if duration > 10:
-                    self.log.warning(f"Sync handling took {duration:.3f} seconds")
+                    self.log.warning(
+                        f"Sync handling ({current_batch}) took {duration:.3f} seconds"
+                    )
 
     def stop(self) -> None:
         """

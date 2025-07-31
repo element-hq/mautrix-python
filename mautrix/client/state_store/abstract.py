@@ -1,11 +1,11 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 from __future__ import annotations
 
-from typing import Awaitable
+from typing import Any, Awaitable
 from abc import ABC, abstractmethod
 
 from mautrix.types import (
@@ -135,7 +135,7 @@ class StateStore(ABC):
 
     @abstractmethod
     async def set_encryption_info(
-        self, room_id: RoomID, content: RoomEncryptionStateEventContent
+        self, room_id: RoomID, content: RoomEncryptionStateEventContent | dict[str, any]
     ) -> None:
         pass
 
@@ -143,6 +143,9 @@ class StateStore(ABC):
         if evt.type == EventType.ROOM_POWER_LEVELS:
             await self.set_power_levels(evt.room_id, evt.content)
         elif evt.type == EventType.ROOM_MEMBER:
+            evt.unsigned["mautrix_prev_membership"] = await self.get_member(
+                evt.room_id, UserID(evt.state_key)
+            )
             await self.set_member(evt.room_id, UserID(evt.state_key), evt.content)
         elif evt.type == EventType.ROOM_ENCRYPTION:
             await self.set_encryption_info(evt.room_id, evt.content)

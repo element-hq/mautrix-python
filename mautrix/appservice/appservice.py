@@ -1,4 +1,4 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -13,7 +13,7 @@ import logging
 from aiohttp import web
 import aiohttp
 
-from mautrix.types import JSON, RoomAlias, UserID
+from mautrix.types import JSON, RoomAlias, UserID, VersionsResponse
 from mautrix.util.logging import TraceLogger
 
 from ..api import HTTPAPI
@@ -36,8 +36,8 @@ class AppService(AppServiceServerMixin):
     domain: str
     id: str
     verify_ssl: bool
-    tls_cert: str
-    tls_key: str
+    tls_cert: str | None
+    tls_key: str | None
     as_token: str
     hs_token: str
     bot_mxid: UserID
@@ -56,7 +56,10 @@ class AppService(AppServiceServerMixin):
     loop: asyncio.AbstractEventLoop
     log: TraceLogger
     app: web.Application
-    runner: web.AppRunner
+    runner: web.AppRunner | None
+
+    _http_session: aiohttp.ClientSession | None
+    _intent: IntentAPI | None
 
     def __init__(
         self,
@@ -77,11 +80,12 @@ class AppService(AppServiceServerMixin):
         state_store: ASStateStore = None,
         aiohttp_params: dict = None,
         ephemeral_events: bool = False,
+        encryption_events: bool = False,
         default_ua: str = HTTPAPI.default_ua,
         default_http_retry_count: int = 0,
         connection_limit: int | None = None,
     ) -> None:
-        super().__init__(ephemeral_events=ephemeral_events)
+        super().__init__(ephemeral_events=ephemeral_events, encryption_events=encryption_events)
         self.server = server
         self.domain = domain
         self.id = id
@@ -177,10 +181,12 @@ class AppService(AppServiceServerMixin):
 
     async def stop(self) -> None:
         self.log.debug("Stopping appservice web server")
-        await self.runner.cleanup()
+        if self.runner:
+            await self.runner.cleanup()
         self._intent = None
-        await self._http_session.close()
-        self._http_session = None
+        if self._http_session:
+            await self._http_session.close()
+            self._http_session = None
         await self.state_store.close()
 
     async def _liveness_probe(self, _: web.Request) -> web.Response:
@@ -188,3 +194,6 @@ class AppService(AppServiceServerMixin):
 
     async def _readiness_probe(self, _: web.Request) -> web.Response:
         return web.Response(status=200 if self.ready else 500, text="{}")
+
+    async def ping_self(self, txn_id: str | None = None) -> int:
+        return await self.intent.appservice_ping(self.id, txn_id=txn_id)

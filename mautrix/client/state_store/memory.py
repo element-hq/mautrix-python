@@ -1,12 +1,11 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 from __future__ import annotations
 
-from typing import Any
-import sys
+from typing import Any, TypedDict
 
 from mautrix.types import (
     Member,
@@ -19,11 +18,6 @@ from mautrix.types import (
 )
 
 from .abstract import StateStore
-
-if sys.version_info >= (3, 8):
-    from typing import TypedDict
-else:
-    from typing_extensions import TypedDict
 
 
 class SerializedStateStore(TypedDict):
@@ -176,8 +170,10 @@ class MemoryStateStore(StateStore):
         return self.power_levels.get(room_id)
 
     async def set_power_levels(
-        self, room_id: RoomID, content: PowerLevelStateEventContent
+        self, room_id: RoomID, content: PowerLevelStateEventContent | dict[str, Any]
     ) -> None:
+        if not isinstance(content, PowerLevelStateEventContent):
+            content = PowerLevelStateEventContent.deserialize(content)
         self.power_levels[room_id] = content
 
     async def has_encryption_info_cached(self, room_id: RoomID) -> bool:
@@ -193,6 +189,8 @@ class MemoryStateStore(StateStore):
         return self.encryption.get(room_id)
 
     async def set_encryption_info(
-        self, room_id: RoomID, content: RoomEncryptionStateEventContent
+        self, room_id: RoomID, content: RoomEncryptionStateEventContent | dict[str, Any]
     ) -> None:
+        if not isinstance(content, RoomEncryptionStateEventContent):
+            content = RoomEncryptionStateEventContent.deserialize(content)
         self.encryption[room_id] = content

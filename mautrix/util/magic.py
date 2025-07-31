@@ -1,4 +1,4 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -17,7 +17,7 @@ except AttributeError:
     _from_filename = lambda file: magic.detect_from_filename(file).mime_type
 
 
-def mimetype(data: bytes | str) -> str:
+def mimetype(data: bytes | bytearray | str) -> str:
     """
     Uses magic to determine the mimetype of a file on disk or in memory.
 
@@ -31,7 +31,15 @@ def mimetype(data: bytes | str) -> str:
     """
     if isinstance(data, str):
         return _from_filename(data)
-    return _from_buffer(data)
+    elif isinstance(data, bytes):
+        return _from_buffer(data)
+    elif isinstance(data, bytearray):
+        # Magic doesn't like bytearrays directly, so just copy the first 1024 bytes for it.
+        return _from_buffer(bytes(data[:1024]))
+    else:
+        raise TypeError(
+            f"mimetype() argument must be a string or bytes, not {type(data).__name__!r}"
+        )
 
 
 __all__ = ["mimetype"]

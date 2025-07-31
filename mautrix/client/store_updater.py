@@ -1,4 +1,4 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 
-from mautrix.errors import MNotFound
+from mautrix.errors import MForbidden, MNotFound
 from mautrix.types import (
     JSON,
     EventID,
@@ -69,20 +69,33 @@ class StoreUpdatingAPI(ClientAPI):
     async def leave_room(
         self,
         room_id: RoomID,
+        reason: str | None = None,
         extra_content: dict[str, JSON] | None = None,
         raise_not_in_room: bool = False,
     ) -> None:
-        await super().leave_room(room_id, extra_content, raise_not_in_room)
+        await super().leave_room(room_id, reason, extra_content, raise_not_in_room)
         if not extra_content and self.state_store:
             await self.state_store.set_membership(room_id, self.mxid, Membership.LEAVE)
+
+    async def knock_room(
+        self,
+        room_id_or_alias: RoomID | RoomAlias,
+        reason: str | None = None,
+        servers: list[str] | None = None,
+    ) -> RoomID:
+        room_id = await super().knock_room(room_id_or_alias, reason, servers)
+        if room_id and self.state_store:
+            await self.state_store.set_membership(room_id, self.mxid, Membership.KNOCK)
+        return room_id
 
     async def invite_user(
         self,
         room_id: RoomID,
         user_id: UserID,
+        reason: str | None = None,
         extra_content: dict[str, JSON] | None = None,
     ) -> None:
-        await super().invite_user(room_id, user_id, extra_content=extra_content)
+        await super().invite_user(room_id, user_id, reason, extra_content=extra_content)
         if not extra_content and self.state_store:
             await self.state_store.set_membership(room_id, user_id, Membership.INVITE)
 
@@ -108,8 +121,14 @@ class StoreUpdatingAPI(ClientAPI):
         if not extra_content and self.state_store:
             await self.state_store.set_membership(room_id, user_id, Membership.BAN)
 
-    async def unban_user(self, room_id: RoomID, user_id: UserID) -> None:
-        await super().unban_user(room_id, user_id)
+    async def unban_user(
+        self,
+        room_id: RoomID,
+        user_id: UserID,
+        reason: str = "",
+        extra_content: dict[str, JSON] | None = None,
+    ) -> None:
+        await super().unban_user(room_id, user_id, reason=reason, extra_content=extra_content)
         if self.state_store:
             await self.state_store.set_membership(room_id, user_id, Membership.LEAVE)
 
@@ -129,6 +148,28 @@ class StoreUpdatingAPI(ClientAPI):
                 ],
             )
         return state
+
+    async def create_room(self, *args, **kwargs) -> RoomID:
+        room_id = await super().create_room(*args, **kwargs)
+        if self.state_store:
+            invitee_membership = Membership.INVITE
+            if kwargs.get("beeper_auto_join_invites"):
+                invitee_membership = Membership.JOIN
+            for user_id in kwargs.get("invitees", []):
+                await self.state_store.set_membership(room_id, user_id, invitee_membership)
+            for evt in kwargs.get("initial_state", []):
+                await self.state_store.update_state(
+                    StateEvent(
+                        type=EventType.find(evt["type"], t_class=EventType.Class.STATE),
+                        room_id=room_id,
+                        event_id=EventID("$fake-create-id"),
+                        sender=self.mxid,
+                        state_key=evt.get("state_key", ""),
+                        timestamp=0,
+                        content=evt["content"],
+                    )
+                )
+        return room_id
 
     async def send_state_event(
         self,
@@ -238,7 +279,7 @@ class StoreUpdatingAPI(ClientAPI):
 
             try:
                 profile = await self.get_profile(user_id)
-            except MNotFound:
+            except (MNotFound, MForbidden):
                 profile = None
             if profile:
                 self.log.trace(

@@ -1,4 +1,4 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -30,7 +30,7 @@ class BaseProxyConfig(BaseConfig, ABC):
     def load(self) -> None:
         self._data = self._load_proxy() or CommentedMap()
 
-    def load_base(self) -> Optional[RecursiveDict[CommentedMap]]:
+    def load_base(self) -> RecursiveDict[CommentedMap] | None:
         return self._load_base_proxy()
 
     def save(self) -> None:

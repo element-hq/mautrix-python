@@ -1,9 +1,11 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
-from typing import Any, AsyncIterable, Awaitable, Iterable, Optional, Tuple, Type, Union
+from __future__ import annotations
+
+from typing import Any, AsyncIterable, Awaitable, Iterable, Union, cast
 from itertools import chain
 from time import time
 import argparse
@@ -16,6 +18,7 @@ import signal
 import sys
 
 from .config import BaseFileConfig, BaseMissingError, BaseValidatableConfig, ConfigValueError
+from .logging import TraceLogger
 
 try:
     import uvloop
@@ -39,11 +42,11 @@ class Program:
     """
 
     loop: asyncio.AbstractEventLoop
-    log: logging.Logger
+    log: TraceLogger
     parser: argparse.ArgumentParser
     args: argparse.Namespace
 
-    config_class: Type[BaseFileConfig]
+    config_class: type[BaseFileConfig]
     config: BaseFileConfig
 
     startup_actions: TaskList
@@ -57,12 +60,12 @@ class Program:
 
     def __init__(
         self,
-        module: Optional[str] = None,
-        name: Optional[str] = None,
-        description: Optional[str] = None,
-        command: Optional[str] = None,
-        version: Optional[str] = None,
-        config_class: Optional[Type[BaseFileConfig]] = None,
+        module: str | None = None,
+        name: str | None = None,
+        description: str | None = None,
+        command: str | None = None,
+        version: str | None = None,
+        config_class: type[BaseFileConfig] | None = None,
     ) -> None:
         if module:
             self.module = module
@@ -95,7 +98,7 @@ class Program:
 
         self.log.info(f"Initializing {self.name} {self.version}")
         try:
-            self.prepare()
+            self.loop.run_until_complete(self._async_prepare())
         except Exception:
             self.log.critical("Unexpected error in initialization", exc_info=True)
             sys.exit(1)
@@ -114,9 +117,10 @@ class Program:
         self.prepare_config()
         self.prepare_log()
         self.check_config()
+        self.init_loop()
 
     @property
-    def _default_base_config(self) -> str:
+    def base_config_path(self) -> str:
         return f"pkg://{self.module}/example-config.yaml"
 
     def prepare_arg_parser(self) -> None:
@@ -131,20 +135,12 @@ class Program:
             help="the path to your config file",
         )
         self.parser.add_argument(
-            "-b",
-            "--base-config",
-            type=str,
-            default=self._default_base_config,
-            metavar="<path>",
-            help="the path to the example config (for automatic config updates)",
-        )
-        self.parser.add_argument(
             "-n", "--no-update", action="store_true", help="Don't save updated config to disk"
         )
 
     def prepare_config(self) -> None:
         """Pre-init lifecycle method. Extend this if you want to customize config loading."""
-        self.config = self.config_class(self.args.config, self.args.base_config)
+        self.config = self.config_class(self.args.config, self.base_config_path)
         self.load_and_update_config()
 
     def load_and_update_config(self) -> None:
@@ -152,13 +148,10 @@ class Program:
         try:
             self.config.update(save=not self.args.no_update)
         except BaseMissingError:
-            if self.args.base_config != self._default_base_config:
-                print(f"Failed to read base config from {self.args.base_config}")
-            else:
-                print(
-                    "Failed to read base config from the default path "
-                    f"({self._default_base_config}). Maybe your installation is corrupted?"
-                )
+            print(
+                "Failed to read base config from the default path "
+                f"({self.base_config_path}). Maybe your installation is corrupted?"
+            )
             sys.exit(12)
 
     def check_config(self) -> None:
@@ -174,22 +167,25 @@ class Program:
     def prepare_log(self) -> None:
         """Pre-init lifecycle method. Extend this if you want to customize logging setup."""
         logging.config.dictConfig(copy.deepcopy(self.config["logging"]))
-        self.log = logging.getLogger("mau.init")
+        self.log = cast(TraceLogger, logging.getLogger("mau.init"))
+
+    async def _async_prepare(self) -> None:
+        self.prepare()
 
     def prepare(self) -> None:
         """
         Lifecycle method where the primary program initialization happens.
         Use this to fill startup_actions with async startup tasks.
         """
-        self.prepare_loop()
 
-    def prepare_loop(self) -> None:
+    def init_loop(self) -> None:
         """Init lifecycle method where the asyncio event loop is created."""
         if uvloop is not None:
-            asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+            uvloop.install()
             self.log.debug("Using uvloop for asyncio")
 
-        self.loop = asyncio.get_event_loop()
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
 
     def start_prometheus(self) -> None:
         try:
@@ -210,6 +206,8 @@ class Program:
         signal.signal(signal.SIGINT, signal.default_int_handler)
         signal.signal(signal.SIGTERM, signal.default_int_handler)
 
+        self._stop_task = self.loop.create_future()
+        exit_code = 0
         try:
             self.log.debug("Running startup actions...")
             start_ts = time()
@@ -219,19 +217,27 @@ class Program:
                 f"Startup actions complete in {round(end_ts - start_ts, 2)} seconds, "
                 "now running forever"
             )
-            self._stop_task = self.loop.create_future()
-            self.loop.run_until_complete(self._stop_task)
+            exit_code = self.loop.run_until_complete(self._stop_task)
             self.log.debug("manual_stop() called, stopping...")
         except KeyboardInterrupt:
             self.log.debug("Interrupt received, stopping...")
         except Exception:
             self.log.critical("Unexpected error in main event loop", exc_info=True)
+            self.loop.run_until_complete(self.system_exit())
             sys.exit(2)
+        except SystemExit:
+            self.loop.run_until_complete(self.system_exit())
+            raise
         self.prepare_stop()
         self.loop.run_until_complete(self.stop())
         self.prepare_shutdown()
+        self.loop.close()
+        asyncio.set_event_loop(None)
         self.log.info("Everything stopped, shutting down")
-        sys.exit(0)
+        sys.exit(exit_code)
+
+    async def system_exit(self) -> None:
+        """Lifecycle method that is called if the main event loop exits using ``sys.exit()``."""
 
     async def start(self) -> None:
         """
@@ -258,9 +264,9 @@ class Program:
     def prepare_shutdown(self) -> None:
         """Lifecycle method that is called right before ``sys.exit(0)``."""
 
-    def manual_stop(self) -> None:
+    def manual_stop(self, exit_code: int = 0) -> None:
         """Tell the event loop to cleanly stop and run the stop lifecycle steps."""
-        self._stop_task.set_result(None)
+        self._stop_task.set_result(exit_code)
 
     def add_startup_actions(self, *actions: NewTask) -> None:
         self.startup_actions = self._add_actions(self.startup_actions, actions)
@@ -276,7 +282,7 @@ class Program:
                 tasks.append(asyncio.create_task(task))
         await asyncio.gather(*tasks)
 
-    def _add_actions(self, to: TaskList, add: Tuple[NewTask, ...]) -> TaskList:
+    def _add_actions(self, to: TaskList, add: tuple[NewTask, ...]) -> TaskList:
         for item in add:
             if inspect.isasyncgen(item):
                 to.append(self._unpack_async_iterator(item))

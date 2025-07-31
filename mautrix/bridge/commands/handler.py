@@ -1,4 +1,4 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -12,6 +12,7 @@ import time
 import traceback
 
 from mautrix.appservice import AppService, IntentAPI
+from mautrix.errors import MForbidden
 from mautrix.types import EventID, MessageEventContent, RoomID
 from mautrix.util import markdown
 from mautrix.util.logging import TraceLogger
@@ -143,6 +144,22 @@ class CommandEvent:
     @property
     def main_intent(self) -> IntentAPI:
         return self.portal.main_intent if self.portal else self.az.intent
+
+    async def redact(self, reason: str | None = None) -> None:
+        """
+        Try to redact the command.
+
+        If the redaction fails with M_FORBIDDEN, the error will be logged and ignored.
+        """
+        try:
+            if self.has_bridge_bot:
+                await self.az.intent.redact(self.room_id, self.event_id, reason=reason)
+            else:
+                await self.main_intent.redact(self.room_id, self.event_id, reason=reason)
+        except MForbidden as e:
+            self.log.warning(f"Failed to redact command {self.command}: {e}")
+        except Exception:
+            self.log.warning(f"Failed to redact command {self.command}", exc_info=True)
 
     def reply(
         self, message: str, allow_html: bool = False, render_markdown: bool = True
@@ -287,9 +304,9 @@ class CommandHandler:
                 "you may only run it in management rooms."
             )
         elif self.needs_admin and not evt.sender.is_admin:
-            return "This command requires administrator privileges."
+            return "That command is limited to bridge administrators."
         elif self.needs_auth and not await evt.sender.is_logged_in():
-            return "This command requires you to be logged in."
+            return "That command requires you to be logged in."
         return None
 
     def has_permission(self, key: HelpCacheKey) -> bool:

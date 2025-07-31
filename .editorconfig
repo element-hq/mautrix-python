@@ -11,8 +11,11 @@ insert_final_newline = true
 [*.py]
 max_line_length = 99
 
+[*.md]
+trim_trailing_whitespace = false
+
 [*.{yaml,yml,py,pyi}]
 indent_style = space
 
-[{.gitlab-ci.yml,.github/workflows/*.yml}]
+[{.gitlab-ci.yml,.github/workflows/*.yml,.pre-commit-config.yaml}]
 indent_size = 2

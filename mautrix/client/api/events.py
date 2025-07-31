@@ -1,4 +1,4 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from typing import Awaitable
+import json
 
 from mautrix.api import Method, Path
 from mautrix.errors import MatrixResponseError
@@ -15,6 +16,7 @@ from mautrix.types import (
     ContentURI,
     Event,
     EventContent,
+    EventContext,
     EventID,
     EventType,
     FilterID,
@@ -32,6 +34,7 @@ from mautrix.types import (
     ReactionEventContent,
     RelatesTo,
     RelationType,
+    RoomEventFilter,
     RoomID,
     Serializable,
     SerializerError,
@@ -41,7 +44,6 @@ from mautrix.types import (
     TextMessageEventContent,
     UserID,
 )
-from mautrix.types.event.state import state_event_content_map
 from mautrix.util.formatter import parse_html
 
 from .base import BaseClientAPI
@@ -95,7 +97,7 @@ class EventMethods(BaseClientAPI):
         if set_presence:
             request["set_presence"] = str(set_presence)
         return self.api.request(
-            Method.GET, Path.sync, query_params=request, retry_count=0, metrics_method="sync"
+            Method.GET, Path.v3.sync, query_params=request, retry_count=0, metrics_method="sync"
         )
 
     # endregion
@@ -117,12 +119,54 @@ class EventMethods(BaseClientAPI):
             The event.
         """
         content = await self.api.request(
-            Method.GET, Path.rooms[room_id].event[event_id], metrics_method="getEvent"
+            Method.GET, Path.v3.rooms[room_id].event[event_id], metrics_method="getEvent"
         )
         try:
             return Event.deserialize(content)
         except SerializerError as e:
             raise MatrixResponseError("Invalid event in response") from e
+
+    async def get_event_context(
+        self,
+        room_id: RoomID,
+        event_id: EventID,
+        limit: int | None = 10,
+        filter: RoomEventFilter | None = None,
+    ) -> EventContext:
+        """
+        Get a number of events that happened just before and after the specified event.
+        This allows clients to get the context surrounding an event, as well as get the state at
+        an event and paginate in either direction.
+
+        Args:
+            room_id: The room to get events from.
+            event_id: The event to get context around.
+            limit: The maximum number of events to return. The limit applies to the total number of
+                   events before and after the requested event. A limit of 0 means no other events
+                   are returned, while 2 means one event before and one after are returned.
+            filter: A JSON RoomEventFilter_ to filter returned events with.
+
+        Returns:
+            The event itself, up to ``limit/2`` events before and after the event, the room state
+            at the event, and pagination tokens to scroll up and down.
+
+        .. _RoomEventFilter:
+            https://spec.matrix.org/v1.1/client-server-api/#filtering
+        """
+        query_params = {}
+        if limit is not None:
+            query_params["limit"] = str(limit)
+        if filter is not None:
+            query_params["filter"] = (
+                filter.serialize() if isinstance(filter, Serializable) else filter
+            )
+        resp = await self.api.request(
+            Method.GET,
+            Path.v3.rooms[room_id].context[event_id],
+            query_params=query_params,
+            metrics_method="get_event_context",
+        )
+        return EventContext.deserialize(resp)
 
     async def get_state_event(
         self,
@@ -147,13 +191,12 @@ class EventMethods(BaseClientAPI):
         """
         content = await self.api.request(
             Method.GET,
-            Path.rooms[room_id].state[event_type][state_key],
+            Path.v3.rooms[room_id].state[event_type][state_key],
             metrics_method="getStateEvent",
         )
+        content["__mautrix_event_type"] = event_type
         try:
-            return state_event_content_map[event_type].deserialize(content)
-        except KeyError:
-            return Obj(**content)
+            return StateEvent.deserialize_content(content)
         except SerializerError as e:
             raise MatrixResponseError("Invalid state event in response") from e
 
@@ -170,7 +213,7 @@ class EventMethods(BaseClientAPI):
             A list of state events with the most recent of each event_type/state_key pair.
         """
         content = await self.api.request(
-            Method.GET, Path.rooms[room_id].state, metrics_method="getState"
+            Method.GET, Path.v3.rooms[room_id].state, metrics_method="getState"
         )
         try:
             return [StateEvent.deserialize(event) for event in content]
@@ -213,7 +256,7 @@ class EventMethods(BaseClientAPI):
             query["not_membership"] = not_membership.value
         content = await self.api.request(
             Method.GET,
-            Path.rooms[room_id].members,
+            Path.v3.rooms[room_id].members,
             query_params=query,
             metrics_method="getMembers",
         )
@@ -243,7 +286,7 @@ class EventMethods(BaseClientAPI):
             https://spec.matrix.org/v1.1/client-server-api/#get_matrixclientv3roomsroomidmembers
         """
         content = await self.api.request(
-            Method.GET, Path.rooms[room_id].joined_members, metrics_method="getJoinedMembers"
+            Method.GET, Path.v3.rooms[room_id].joined_members, metrics_method="getJoinedMembers"
         )
         try:
             return {
@@ -263,16 +306,16 @@ class EventMethods(BaseClientAPI):
         self,
         room_id: RoomID,
         direction: PaginationDirection,
-        from_token: SyncToken,
+        from_token: SyncToken | None = None,
         to_token: SyncToken | None = None,
         limit: int | None = None,
-        filter_json: str | None = None,
+        filter_json: str | dict | RoomEventFilter | None = None,
     ) -> PaginatedMessages:
         """
         Get a list of message and state events for a room. Pagination parameters are used to
         paginate history in the room.
 
-        See also: `API reference <https://spec.matrix.org/v1.1/client-server-api/#get_matrixclientv3roomsroomidmessages>`__
+        See also: `API reference <https://spec.matrix.org/v1.3/client-server-api/#get_matrixclientv3roomsroomidmessages>`__
 
         Args:
             room_id: The ID of the room to get events from.
@@ -280,6 +323,9 @@ class EventMethods(BaseClientAPI):
             from_token: The token to start returning events from. This token can be obtained from a
                 ``prev_batch`` token returned for each room by the `sync endpoint`_, or from a
                 ``start`` or ``end`` token returned by a previous request to this endpoint.
+
+                Starting from Matrix v1.3, this field can be omitted to fetch events from the
+                beginning or end of the room.
             to_token: The token to stop returning events at.
             limit: The maximum number of events to return. Defaults to 10.
             filter_json: A JSON RoomEventFilter_ to filter returned events with.
@@ -287,20 +333,24 @@ class EventMethods(BaseClientAPI):
         Returns:
 
         .. _RoomEventFilter:
-            https://spec.matrix.org/v1.1/client-server-api/#filtering
+            https://spec.matrix.org/v1.3/client-server-api/#filtering
         .. _sync endpoint:
-            https://spec.matrix.org/v1.1/client-server-api/#get_matrixclientv3sync
+            https://spec.matrix.org/v1.3/client-server-api/#get_matrixclientv3sync
         """
+        if isinstance(filter_json, Serializable):
+            filter_json = filter_json.json()
+        elif isinstance(filter_json, dict):
+            filter_json = json.dumps(filter_json)
         query_params = {
             "from": from_token,
             "dir": direction.value,
             "to": to_token,
             "limit": str(limit) if limit else None,
-            "filter_json": filter_json,
+            "filter": filter_json,
         }
         content = await self.api.request(
             Method.GET,
-            Path.rooms[room_id].messages,
+            Path.v3.rooms[room_id].messages,
             query_params=query_params,
             metrics_method="getMessages",
         )
@@ -329,6 +379,7 @@ class EventMethods(BaseClientAPI):
         event_type: EventType,
         content: StateEventContent,
         state_key: str = "",
+        ensure_joined: bool = True,
         **kwargs,
     ) -> EventID:
         """
@@ -342,6 +393,8 @@ class EventMethods(BaseClientAPI):
             event_type: The type of state to send.
             content: The content to send.
             state_key: The key for the state to send. Defaults to empty string.
+            ensure_joined: Used by IntentAPI to determine if it should ensure the user is joined
+                before sending the event.
             **kwargs: Optional parameters to pass to the :meth:`HTTPAPI.request` method. Used by
                 :class:`IntentAPI` to pass the timestamp massaging field to
                 :meth:`AppServiceAPI.request`.
@@ -352,7 +405,7 @@ class EventMethods(BaseClientAPI):
         content = content.serialize() if isinstance(content, Serializable) else content
         resp = await self.api.request(
             Method.PUT,
-            Path.rooms[room_id].state[event_type][state_key],
+            Path.v3.rooms[room_id].state[event_type][state_key],
             content,
             **kwargs,
             metrics_method="sendStateEvent",
@@ -392,7 +445,7 @@ class EventMethods(BaseClientAPI):
             raise ValueError("Room ID not given")
         elif not event_type:
             raise ValueError("Event type not given")
-        url = Path.rooms[room_id].send[event_type][txn_id or self.api.get_txn_id()]
+        url = Path.v3.rooms[room_id].send[event_type][txn_id or self.api.get_txn_id()]
         content = content.serialize() if isinstance(content, Serializable) else content
         resp = await self.api.request(
             Method.PUT, url, content, **kwargs, metrics_method="sendMessageEvent"
@@ -663,7 +716,7 @@ class EventMethods(BaseClientAPI):
         Returns:
             The ID of the event that was sent to redact the other event.
         """
-        url = Path.rooms[room_id].redact[event_id][self.api.get_txn_id()]
+        url = Path.v3.rooms[room_id].redact[event_id][self.api.get_txn_id()]
         content = extra_content or {}
         if reason:
             content["reason"] = reason

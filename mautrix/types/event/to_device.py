@@ -1,4 +1,4 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -9,17 +9,20 @@ from attr import dataclass
 import attr
 
 from ..primitive import JSON, DeviceID, IdentityKey, RoomID, SessionID, SigningKey, UserID
-from ..util import ExtensibleEnum, Obj, SerializableAttrs, deserializer
+from ..util import ExtensibleEnum, Obj, SerializableAttrs, deserializer, field
 from .base import BaseEvent, EventType
+from .beeper import BeeperRoomKeyAckEventContent
 from .encrypted import EncryptedOlmEventContent, EncryptionAlgorithm
 
 
 class RoomKeyWithheldCode(ExtensibleEnum):
     BLACKLISTED: "RoomKeyWithheldCode" = "m.blacklisted"
     UNVERIFIED: "RoomKeyWithheldCode" = "m.unverified"
-    UNAUTHORIZED: "RoomKeyWithheldCode" = "m.unauthorized"
+    UNAUTHORIZED: "RoomKeyWithheldCode" = "m.unauthorised"
     UNAVAILABLE: "RoomKeyWithheldCode" = "m.unavailable"
     NO_OLM_SESSION: "RoomKeyWithheldCode" = "m.no_olm"
+
+    BEEPER_REDACTED: "RoomKeyWithheldCode" = "com.beeper.redacted"
 
 
 @dataclass
@@ -38,6 +41,10 @@ class RoomKeyEventContent(SerializableAttrs):
     room_id: RoomID
     session_id: SessionID
     session_key: str
+
+    beeper_max_age_ms: Optional[int] = field(json="com.beeper.max_age_ms", default=None)
+    beeper_max_messages: Optional[int] = field(json="com.beeper.max_messages", default=None)
+    beeper_is_scheduled: Optional[bool] = field(json="com.beeper.is_scheduled", default=False)
 
 
 class KeyRequestAction(ExtensibleEnum):
@@ -61,7 +68,7 @@ class RoomKeyRequestEventContent(SerializableAttrs):
     body: Optional[RequestedKeyInfo] = None
 
 
-@dataclass
+@dataclass(kw_only=True)
 class ForwardedRoomKeyEventContent(RoomKeyEventContent, SerializableAttrs):
     sender_key: IdentityKey
     signing_key: SigningKey = attr.ib(metadata={"json": "sender_claimed_ed25519_key"})
@@ -75,6 +82,7 @@ ToDeviceEventContent = Union[
     RoomKeyEventContent,
     RoomKeyRequestEventContent,
     ForwardedRoomKeyEventContent,
+    BeeperRoomKeyAckEventContent,
 ]
 to_device_event_content_map = {
     EventType.TO_DEVICE_ENCRYPTED: EncryptedOlmEventContent,
@@ -82,10 +90,8 @@ to_device_event_content_map = {
     EventType.ROOM_KEY_REQUEST: RoomKeyRequestEventContent,
     EventType.ROOM_KEY: RoomKeyEventContent,
     EventType.FORWARDED_ROOM_KEY: ForwardedRoomKeyEventContent,
+    EventType.BEEPER_ROOM_KEY_ACK: BeeperRoomKeyAckEventContent,
 }
-
-
-# TODO remaining account data event types
 
 
 @dataclass
@@ -100,7 +106,9 @@ class ToDeviceEvent(BaseEvent, SerializableAttrs):
             data.setdefault("content", {})["__mautrix_event_type"] = evt_type
         except ValueError:
             return Obj(**data)
-        return super().deserialize(data)
+        evt = super().deserialize(data)
+        evt.type = evt_type
+        return evt
 
     @staticmethod
     @deserializer(ToDeviceEventContent)
@@ -110,3 +118,9 @@ class ToDeviceEvent(BaseEvent, SerializableAttrs):
         if not content_type:
             return Obj(**data)
         return content_type.deserialize(data)
+
+
+@dataclass
+class ASToDeviceEvent(ToDeviceEvent, SerializableAttrs):
+    to_user_id: UserID
+    to_device_id: DeviceID

@@ -1,4 +1,4 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -10,6 +10,7 @@ import olm
 
 from mautrix.errors import DecryptionError, MatchingSessionDecryptionError
 from mautrix.types import (
+    DecryptedOlmEvent,
     EncryptedOlmEventContent,
     EncryptionAlgorithm,
     IdentityKey,
@@ -18,10 +19,10 @@ from mautrix.types import (
     ToDeviceEvent,
     UserID,
 )
+from mautrix.util import background_task
 
 from .base import BaseOlmMachine
 from .sessions import Session
-from .types import DecryptedOlmEvent
 
 
 class OlmDecryptionMachine(BaseOlmMachine):
@@ -74,19 +75,19 @@ class OlmDecryptionMachine(BaseOlmMachine):
                 f"Found matching session yet decryption failed for sender {sender}"
                 f" with key {sender_key}"
             )
-            asyncio.create_task(self._unwedge_session(sender, sender_key))
+            background_task.create(self._unwedge_session(sender, sender_key))
             raise
 
         if not plaintext:
             if message.type != OlmMsgType.PREKEY:
-                asyncio.create_task(self._unwedge_session(sender, sender_key))
+                background_task.create(self._unwedge_session(sender, sender_key))
                 raise DecryptionError("Decryption failed for normal message")
 
             self.log.trace(f"Trying to create inbound session for {sender}/{sender_key}")
             try:
                 session = await self._create_inbound_session(sender_key, message.body)
             except olm.OlmSessionError as e:
-                asyncio.create_task(self._unwedge_session(sender, sender_key))
+                background_task.create(self._unwedge_session(sender, sender_key))
                 raise DecryptionError("Failed to create new session from prekey message") from e
             self.log.debug(
                 f"Created inbound session {session.id} for {sender} (sender key: {sender_key})"

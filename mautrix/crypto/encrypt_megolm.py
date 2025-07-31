@@ -1,11 +1,11 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 from typing import Any, Dict, List, Tuple, Union
 from collections import defaultdict
-from datetime import timedelta
+from datetime import datetime, timedelta
 import asyncio
 import json
 import time
@@ -13,6 +13,7 @@ import time
 from mautrix.errors import EncryptionError, SessionShareError
 from mautrix.types import (
     DeviceID,
+    DeviceIdentity,
     EncryptedMegolmEventContent,
     EncryptionAlgorithm,
     EventType,
@@ -24,13 +25,13 @@ from mautrix.types import (
     Serializable,
     SessionID,
     SigningKey,
+    TrustState,
     UserID,
 )
 
 from .device_lists import DeviceListMachine
 from .encrypt_olm import OlmEncryptionMachine
 from .sessions import InboundGroupSession, OutboundGroupSession, Session
-from .types import DeviceIdentity, TrustState
 
 
 class Sentinel:
@@ -94,9 +95,9 @@ class MegolmEncryptionMachine(OlmEncryptionMachine, DeviceListMachine):
                 {
                     "room_id": room_id,
                     "type": event_type.serialize(),
-                    "content": content.serialize()
-                    if isinstance(content, Serializable)
-                    else content,
+                    "content": (
+                        content.serialize() if isinstance(content, Serializable) else content
+                    ),
                 }
             )
         )
@@ -172,21 +173,6 @@ class MegolmEncryptionMachine(OlmEncryptionMachine, DeviceListMachine):
             session = await self._new_outbound_group_session(room_id)
         self.log.debug(f"Sharing group session {session.id} for room {room_id} with {users}")
 
-        encryption_info = await self.state_store.get_encryption_info(room_id)
-        if encryption_info:
-            if encryption_info.algorithm != EncryptionAlgorithm.MEGOLM_V1:
-                raise SessionShareError("Room encryption algorithm is not supported")
-            session.max_messages = encryption_info.rotation_period_msgs or session.max_messages
-            session.max_age = (
-                timedelta(milliseconds=encryption_info.rotation_period_ms)
-                if encryption_info.rotation_period_ms
-                else session.max_age
-            )
-            self.log.debug(
-                "Got stored encryption state event and configured session to rotate "
-                f"after {session.max_messages} messages or {session.max_age}"
-            )
-
         olm_sessions: DeviceMap = defaultdict(lambda: {})
         withhold_key_msgs = defaultdict(lambda: {})
         missing_sessions: Dict[UserID, Dict[DeviceID, DeviceIdentity]] = defaultdict(lambda: {})
@@ -220,7 +206,10 @@ class MegolmEncryptionMachine(OlmEncryptionMachine, DeviceListMachine):
 
         if missing_sessions:
             self.log.debug(f"Creating missing outbound sessions {missing_sessions}")
-            await self._create_outbound_sessions(missing_sessions)
+            try:
+                await self._create_outbound_sessions(missing_sessions)
+            except Exception:
+                self.log.exception("Failed to create missing outbound sessions")
 
         for user_id, devices in missing_sessions.items():
             for device_id, device in devices.items():
@@ -249,13 +238,33 @@ class MegolmEncryptionMachine(OlmEncryptionMachine, DeviceListMachine):
 
     async def _new_outbound_group_session(self, room_id: RoomID) -> OutboundGroupSession:
         session = OutboundGroupSession(room_id)
-        await self._create_group_session(
-            self.account.identity_key,
-            self.account.signing_key,
-            room_id,
-            SessionID(session.id),
-            session.session_key,
-        )
+
+        encryption_info = await self.state_store.get_encryption_info(room_id)
+        if encryption_info:
+            if encryption_info.algorithm != EncryptionAlgorithm.MEGOLM_V1:
+                raise SessionShareError("Room encryption algorithm is not supported")
+            session.max_messages = encryption_info.rotation_period_msgs or session.max_messages
+            session.max_age = (
+                timedelta(milliseconds=encryption_info.rotation_period_ms)
+                if encryption_info.rotation_period_ms
+                else session.max_age
+            )
+            self.log.debug(
+                "Got stored encryption state event and configured session to rotate "
+                f"after {session.max_messages} messages or {session.max_age}"
+            )
+
+        if not self.dont_store_outbound_keys:
+            await self._create_group_session(
+                self.account.identity_key,
+                self.account.signing_key,
+                room_id,
+                SessionID(session.id),
+                session.session_key,
+                max_messages=session.max_messages,
+                max_age=session.max_age,
+                is_scheduled=False,
+            )
         return session
 
     async def _encrypt_and_share_group_session(
@@ -282,6 +291,9 @@ class MegolmEncryptionMachine(OlmEncryptionMachine, DeviceListMachine):
         room_id: RoomID,
         session_id: SessionID,
         session_key: str,
+        max_age: Union[timedelta, int],
+        max_messages: int,
+        is_scheduled: bool = False,
     ) -> None:
         start = time.monotonic()
         session = InboundGroupSession(
@@ -289,6 +301,10 @@ class MegolmEncryptionMachine(OlmEncryptionMachine, DeviceListMachine):
             signing_key=signing_key,
             sender_key=sender_key,
             room_id=room_id,
+            received_at=datetime.utcnow(),
+            max_age=max_age,
+            max_messages=max_messages,
+            is_scheduled=is_scheduled,
         )
         olm_duration = time.monotonic() - start
         if olm_duration > 5:
@@ -298,7 +314,10 @@ class MegolmEncryptionMachine(OlmEncryptionMachine, DeviceListMachine):
             session_id = session.id
         await self.crypto_store.put_group_session(room_id, sender_key, session_id, session)
         self._mark_session_received(session_id)
-        self.log.debug(f"Created inbound group session {room_id}/{sender_key}/{session_id}")
+        self.log.debug(
+            f"Created inbound group session {room_id}/{sender_key}/{session_id} "
+            f"(max {max_age} / {max_messages} messages, {is_scheduled=})"
+        )
 
     async def _find_olm_sessions(
         self,
@@ -314,7 +333,8 @@ class MegolmEncryptionMachine(OlmEncryptionMachine, DeviceListMachine):
             session.users_ignored.add(key)
             return already_shared
 
-        if device.trust == TrustState.BLACKLISTED:
+        trust = await self.resolve_trust(device)
+        if trust == TrustState.BLACKLISTED:
             self.log.debug(
                 f"Not encrypting group session {session.id} for {device_id} "
                 f"of {user_id}: device is blacklisted"
@@ -328,10 +348,11 @@ class MegolmEncryptionMachine(OlmEncryptionMachine, DeviceListMachine):
                 code=RoomKeyWithheldCode.BLACKLISTED,
                 reason="Device is blacklisted",
             )
-        elif not self.allow_unverified_devices and device.trust == TrustState.UNSET:
+        elif self.send_keys_min_trust > trust:
             self.log.debug(
                 f"Not encrypting group session {session.id} for {device_id} "
-                f"of {user_id}: device is not verified"
+                f"of {user_id}: device is not trusted "
+                f"(min: {self.send_keys_min_trust}, device: {trust})"
             )
             session.users_ignored.add(key)
             return RoomKeyWithheldEventContent(

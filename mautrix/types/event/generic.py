@@ -1,4 +1,4 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -9,6 +9,7 @@ from ..primitive import JSON
 from ..util import Obj, deserializer
 from .account_data import AccountDataEvent, AccountDataEventContent
 from .base import EventType, GenericEvent
+from .beeper import BeeperMessageStatusEvent, BeeperMessageStatusEventContent
 from .encrypted import EncryptedEvent, EncryptedEventContent
 from .ephemeral import (
     EphemeralEvent,
@@ -22,7 +23,7 @@ from .message import MessageEvent, MessageEventContent
 from .reaction import ReactionEvent, ReactionEventContent
 from .redaction import RedactionEvent, RedactionEventContent
 from .state import StateEvent, StateEventContent
-from .to_device import ToDeviceEvent, ToDeviceEventContent
+from .to_device import ASToDeviceEvent, ToDeviceEvent, ToDeviceEventContent
 from .voip import CallEvent, CallEventContent, type_to_class as voip_types
 
 Event = NewType(
@@ -37,7 +38,9 @@ Event = NewType(
         PresenceEvent,
         EncryptedEvent,
         ToDeviceEvent,
+        ASToDeviceEvent,
         CallEvent,
+        BeeperMessageStatusEvent,
         GenericEvent,
     ],
 )
@@ -53,6 +56,7 @@ EventContent = Union[
     EncryptedEventContent,
     ToDeviceEventContent,
     CallEventContent,
+    BeeperMessageStatusEventContent,
     Obj,
 ]
 
@@ -81,6 +85,8 @@ def deserialize_event(data: JSON) -> Event:
         return AccountDataEvent.deserialize(data)
     elif event_type.is_ephemeral:
         return EphemeralEvent.deserialize(data)
+    elif event_type == EventType.BEEPER_MESSAGE_STATUS:
+        return BeeperMessageStatusEvent.deserialize(data)
     else:
         return GenericEvent.deserialize(data)
 

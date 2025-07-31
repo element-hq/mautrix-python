@@ -1,3 +1,8 @@
+# Copyright (c) 2022 Sumner Evans
+#
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
 from typing import Optional
 import logging
 
@@ -24,6 +29,7 @@ class MessageSendCheckpointStatus(SerializableEnum):
     PERM_FAILURE = "PERM_FAILURE"
     UNSUPPORTED = "UNSUPPORTED"
     TIMEOUT = "TIMEOUT"
+    DELIVERY_FAILED = "DELIVERY_FAILED"
 
 
 class MessageSendCheckpointReportedBy(SerializableEnum):
@@ -46,31 +52,37 @@ class MessageSendCheckpoint(SerializableAttrs):
     client_type: Optional[str] = None
     client_version: Optional[str] = None
 
-    async def send(self, log: logging.Logger, endpoint: str, as_token: str) -> None:
+    async def send(self, endpoint: str, as_token: str, log: logging.Logger) -> None:
         if not endpoint:
             return
         try:
             headers = {"Authorization": f"Bearer {as_token}", "User-Agent": HTTPAPI.default_ua}
-            async with aiohttp.ClientSession() as sess, sess.post(
-                endpoint,
-                json={"checkpoints": [self.serialize()]},
-                headers=headers,
-                timeout=ClientTimeout(5),
-            ) as resp:
+            async with (
+                aiohttp.ClientSession() as sess,
+                sess.post(
+                    endpoint,
+                    json={"checkpoints": [self.serialize()]},
+                    headers=headers,
+                    timeout=ClientTimeout(30),
+                ) as resp,
+            ):
                 if not 200 <= resp.status < 300:
                     text = await resp.text()
                     text = text.replace("\n", "\\n")
                     log.warning(
-                        f"Unexpected status code {resp.status} sending message send checkpoints "
-                        f"for {self.event_id}: {text}"
+                        f"Unexpected status code {resp.status} sending checkpoint "
+                        f"for {self.event_id} ({self.step}/{self.status}): {text}"
                     )
                 else:
                     log.info(
-                        f"Successfully sent message send checkpoints for {self.event_id} "
-                        f"(step: {self.step})"
+                        f"Successfully sent checkpoint for {self.event_id} "
+                        f"({self.step}/{self.status})"
                     )
         except Exception as e:
-            log.warning(f"Failed to send message send checkpoints for {self.event_id}: {e}")
+            log.warning(
+                f"Failed to send checkpoint for {self.event_id} ({self.step}/{self.status}): "
+                f"{type(e).__name__}: {e}"
+            )
 
 
 CHECKPOINT_TYPES = {
@@ -78,6 +90,9 @@ CHECKPOINT_TYPES = {
     EventType.ROOM_MESSAGE,
     EventType.ROOM_ENCRYPTED,
     EventType.ROOM_MEMBER,
+    EventType.ROOM_NAME,
+    EventType.ROOM_AVATAR,
+    EventType.ROOM_TOPIC,
     EventType.STICKER,
     EventType.REACTION,
     EventType.CALL_INVITE,

@@ -1,4 +1,4 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -6,9 +6,23 @@
 from __future__ import annotations
 
 from mautrix.client.state_store import SyncStore
-from mautrix.types import DeviceID, EventID, IdentityKey, RoomID, SessionID, SyncToken, UserID
+from mautrix.types import (
+    CrossSigner,
+    CrossSigningUsage,
+    DeviceID,
+    DeviceIdentity,
+    EventID,
+    IdentityKey,
+    RoomID,
+    SessionID,
+    SigningKey,
+    SyncToken,
+    TOFUSigningKey,
+    UserID,
+)
 
-from .. import DeviceIdentity, InboundGroupSession, OlmAccount, OutboundGroupSession, Session
+from ..account import OlmAccount
+from ..sessions import InboundGroupSession, OutboundGroupSession, Session
 from .abstract import CryptoStore
 
 
@@ -19,8 +33,10 @@ class MemoryCryptoStore(CryptoStore, SyncStore):
     _message_indices: dict[tuple[IdentityKey, SessionID, int], tuple[EventID, int]]
     _devices: dict[UserID, dict[DeviceID, DeviceIdentity]]
     _olm_sessions: dict[IdentityKey, list[Session]]
-    _inbound_sessions: dict[tuple[RoomID, IdentityKey, SessionID], InboundGroupSession]
+    _inbound_sessions: dict[tuple[RoomID, SessionID], InboundGroupSession]
     _outbound_sessions: dict[RoomID, OutboundGroupSession]
+    _signatures: dict[CrossSigner, dict[CrossSigner, str]]
+    _cross_signing_keys: dict[UserID, dict[CrossSigningUsage, TOFUSigningKey]]
 
     def __init__(self, account_id: str, pickle_key: str) -> None:
         self.account_id = account_id
@@ -34,6 +50,8 @@ class MemoryCryptoStore(CryptoStore, SyncStore):
         self._olm_sessions = {}
         self._inbound_sessions = {}
         self._outbound_sessions = {}
+        self._signatures = {}
+        self._cross_signing_keys = {}
 
     async def get_device_id(self) -> DeviceID | None:
         return self._device_id
@@ -85,17 +103,42 @@ class MemoryCryptoStore(CryptoStore, SyncStore):
         session_id: SessionID,
         session: InboundGroupSession,
     ) -> None:
-        self._inbound_sessions[(room_id, sender_key, session_id)] = session
+        self._inbound_sessions[(room_id, session_id)] = session
 
     async def get_group_session(
-        self, room_id: RoomID, sender_key: IdentityKey, session_id: SessionID
+        self, room_id: RoomID, session_id: SessionID
     ) -> InboundGroupSession:
-        return self._inbound_sessions.get((room_id, sender_key, session_id))
+        return self._inbound_sessions.get((room_id, session_id))
 
-    async def has_group_session(
-        self, room_id: RoomID, sender_key: IdentityKey, session_id: SessionID
-    ) -> bool:
-        return (room_id, sender_key, session_id) in self._inbound_sessions
+    async def redact_group_session(
+        self, room_id: RoomID, session_id: SessionID, reason: str
+    ) -> None:
+        self._inbound_sessions.pop((room_id, session_id), None)
+
+    async def redact_group_sessions(
+        self, room_id: RoomID, sender_key: IdentityKey, reason: str
+    ) -> list[SessionID]:
+        if not room_id and not sender_key:
+            raise ValueError("Either room_id or sender_key must be provided")
+        deleted = []
+        keys = list(self._inbound_sessions.keys())
+        for key in keys:
+            item = self._inbound_sessions[key]
+            if (not room_id or item.room_id == room_id) and (
+                not sender_key or item.sender_key == sender_key
+            ):
+                deleted.append(SessionID(item.id))
+                del self._inbound_sessions[key]
+        return deleted
+
+    async def redact_expired_group_sessions(self) -> list[SessionID]:
+        raise NotImplementedError()
+
+    async def redact_outdated_group_sessions(self) -> list[SessionID]:
+        raise NotImplementedError()
+
+    async def has_group_session(self, room_id: RoomID, session_id: SessionID) -> bool:
+        return (room_id, session_id) in self._inbound_sessions
 
     async def add_outbound_group_session(self, session: OutboundGroupSession) -> None:
         self._outbound_sessions[session.room_id] = session
@@ -147,3 +190,32 @@ class MemoryCryptoStore(CryptoStore, SyncStore):
 
     async def filter_tracked_users(self, users: list[UserID]) -> list[UserID]:
         return [user_id for user_id in users if user_id in self._devices]
+
+    async def put_cross_signing_key(
+        self, user_id: UserID, usage: CrossSigningUsage, key: SigningKey
+    ) -> None:
+        try:
+            current = self._cross_signing_keys[user_id][usage]
+        except KeyError:
+            self._cross_signing_keys.setdefault(user_id, {})[usage] = TOFUSigningKey(
+                key=key, first=key
+            )
+        else:
+            current.key = key
+
+    async def get_cross_signing_keys(
+        self, user_id: UserID
+    ) -> dict[CrossSigningUsage, TOFUSigningKey]:
+        return self._cross_signing_keys.get(user_id, {})
+
+    async def put_signature(
+        self, target: CrossSigner, signer: CrossSigner, signature: str
+    ) -> None:
+        self._signatures.setdefault(signer, {})[target] = signature
+
+    async def is_key_signed_by(self, target: CrossSigner, signer: CrossSigner) -> bool:
+        return target in self._signatures.get(signer, {})
+
+    async def drop_signatures_by_key(self, signer: CrossSigner) -> int:
+        deleted = self._signatures.pop(signer, None)
+        return len(deleted)

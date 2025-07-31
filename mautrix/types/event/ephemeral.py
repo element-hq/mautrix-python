@@ -1,4 +1,4 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -8,7 +8,7 @@ from typing import Dict, List, NewType, Union
 from attr import dataclass
 
 from ..primitive import JSON, EventID, RoomID, UserID
-from ..util import SerializableAttrs, SerializableEnum, deserializer
+from ..util import ExtensibleEnum, SerializableAttrs, SerializableEnum, deserializer
 from .base import BaseEvent, GenericEvent
 from .type import EventType
 
@@ -49,8 +49,9 @@ class SingleReceiptEventContent(SerializableAttrs):
     ts: int
 
 
-class ReceiptType(SerializableEnum):
+class ReceiptType(ExtensibleEnum):
     READ = "m.read"
+    READ_PRIVATE = "m.read.private"
 
 
 ReceiptEventContent = Dict[EventID, Dict[ReceiptType, Dict[UserID, SingleReceiptEventContent]]]
@@ -69,13 +70,15 @@ EphemeralEvent = NewType("EphemeralEvent", Union[PresenceEvent, TypingEvent, Rec
 def deserialize_ephemeral_event(data: JSON) -> EphemeralEvent:
     event_type = EventType.find(data.get("type", None))
     if event_type == EventType.RECEIPT:
-        return ReceiptEvent.deserialize(data)
+        evt = ReceiptEvent.deserialize(data)
     elif event_type == EventType.TYPING:
-        return TypingEvent.deserialize(data)
+        evt = TypingEvent.deserialize(data)
     elif event_type == EventType.PRESENCE:
-        return PresenceEvent.deserialize(data)
+        evt = PresenceEvent.deserialize(data)
     else:
-        return GenericEvent.deserialize(data)
+        evt = GenericEvent.deserialize(data)
+    evt.type = event_type
+    return evt
 
 
 setattr(EphemeralEvent, "deserialize", deserialize_ephemeral_event)

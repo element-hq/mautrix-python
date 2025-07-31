@@ -1,9 +1,9 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
-from typing import ClassVar, Dict, Optional
+from typing import Any, ClassVar, Dict, Optional
 import logging
 import time
 
@@ -62,8 +62,8 @@ ok_ish_states = (
 class BridgeState(SerializableAttrs):
     human_readable_errors: ClassVar[Dict[Optional[str], str]] = {}
     default_source: ClassVar[str] = "bridge"
-    default_error_ttl: ClassVar[int] = 60
-    default_ok_ttl: ClassVar[int] = 240
+    default_error_ttl: ClassVar[int] = 3600
+    default_ok_ttl: ClassVar[int] = 21600
 
     state_event: BridgeStateEvent
     user_id: Optional[UserID] = None
@@ -74,6 +74,10 @@ class BridgeState(SerializableAttrs):
     source: Optional[str] = None
     error: Optional[str] = None
     message: Optional[str] = None
+    info: Optional[Dict[str, Any]] = None
+    reason: Optional[str] = None
+
+    send_attempts_: int = field(default=0, hidden=True)
 
     def fill(self) -> "BridgeState":
         self.timestamp = self.timestamp or int(time.time())
@@ -98,20 +102,23 @@ class BridgeState(SerializableAttrs):
             not prev_state
             or prev_state.state_event != self.state_event
             or prev_state.error != self.error
+            or prev_state.info != self.info
         ):
             # If there's no previous state or the state was different, send this one.
             return False
-        # If there's more than ⅘ of the previous pong's time-to-live left, drop this one
-        return prev_state.timestamp + (prev_state.ttl / 5) > self.timestamp
+        # If the previous state is recent, drop this one
+        return prev_state.timestamp + prev_state.ttl > self.timestamp
 
-    async def send(self, url: str, token: str, log: logging.Logger, log_sent: bool = True) -> None:
+    async def send(self, url: str, token: str, log: logging.Logger, log_sent: bool = True) -> bool:
         if not url:
-            return
+            return True
+        self.send_attempts_ += 1
         headers = {"Authorization": f"Bearer {token}", "User-Agent": HTTPAPI.default_ua}
         try:
-            async with aiohttp.ClientSession() as sess, sess.post(
-                url, json=self.serialize(), headers=headers
-            ) as resp:
+            async with (
+                aiohttp.ClientSession() as sess,
+                sess.post(url, json=self.serialize(), headers=headers) as resp,
+            ):
                 if not 200 <= resp.status < 300:
                     text = await resp.text()
                     text = text.replace("\n", "\\n")
@@ -119,13 +126,16 @@ class BridgeState(SerializableAttrs):
                         f"Unexpected status code {resp.status} "
                         f"sending bridge state update: {text}"
                     )
+                    return False
                 elif log_sent:
                     log.debug(f"Sent new bridge state {self}")
         except Exception as e:
             log.warning(f"Failed to send updated bridge state: {e}")
+            return False
+        return True
 
 
 @dataclass(kw_only=True)
 class GlobalBridgeState(SerializableAttrs):
-    remote_states: Optional[Dict[str, BridgeState]] = field(json="remoteState")
+    remote_states: Optional[Dict[str, BridgeState]] = field(json="remoteState", default=None)
     bridge_state: BridgeState = field(json="bridgeState")

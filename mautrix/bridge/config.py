@@ -1,12 +1,14 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 from abc import ABC
+import json
+import os
 import re
 import secrets
 import time
@@ -21,15 +23,40 @@ from mautrix.util.config import (
 
 
 class BaseBridgeConfig(BaseFileConfig, BaseValidatableConfig, ABC):
+    env_prefix: str | None = None
     registration_path: str
     _registration: dict | None
     _check_tokens: bool
+    env: dict[str, Any]
 
-    def __init__(self, path: str, registration_path: str, base_path: str) -> None:
+    def __init__(
+        self, path: str, registration_path: str, base_path: str, env_prefix: str | None = None
+    ) -> None:
         super().__init__(path, base_path)
         self.registration_path = registration_path
         self._registration = None
         self._check_tokens = True
+        self.env = {}
+        if not self.env_prefix:
+            self.env_prefix = env_prefix
+        if self.env_prefix:
+            env_prefix = f"{self.env_prefix}_"
+            for key, value in os.environ.items():
+                if not key.startswith(env_prefix):
+                    continue
+                key = key.removeprefix(env_prefix)
+                if value.startswith("json::"):
+                    value = json.loads(value.removeprefix("json::"))
+                self.env[key] = value
+
+    def __getitem__(self, item: str) -> Any:
+        if self.env:
+            try:
+                sanitized_item = item.replace(".", "_").replace("[", "").replace("]", "").upper()
+                return self.env[sanitized_item]
+            except KeyError:
+                pass
+        return super().__getitem__(item)
 
     def save(self) -> None:
         super().save()
@@ -45,6 +72,7 @@ class BaseBridgeConfig(BaseFileConfig, BaseValidatableConfig, ABC):
     def forbidden_defaults(self) -> list[ForbiddenDefault]:
         return [
             ForbiddenDefault("homeserver.address", "https://example.com"),
+            ForbiddenDefault("homeserver.address", "https://matrix.example.com"),
             ForbiddenDefault("homeserver.domain", "example.com"),
         ] + (
             [
@@ -73,6 +101,11 @@ class BaseBridgeConfig(BaseFileConfig, BaseValidatableConfig, ABC):
         copy("homeserver.connection_limit")
         copy("homeserver.status_endpoint")
         copy("homeserver.message_send_checkpoint_endpoint")
+        copy("homeserver.async_media")
+        if self.get("homeserver.asmux", False):
+            helper.base["homeserver.software"] = "asmux"
+        else:
+            copy("homeserver.software")
 
         copy("appservice.address")
         copy("appservice.hostname")
@@ -82,7 +115,12 @@ class BaseBridgeConfig(BaseFileConfig, BaseValidatableConfig, ABC):
         copy("appservice.tls_cert")
         copy("appservice.tls_key")
 
-        copy("appservice.database")
+        if "appservice.database" in self and self["appservice.database"].startswith("sqlite:///"):
+            helper.base["appservice.database"] = self["appservice.database"].replace(
+                "sqlite:///", "sqlite:"
+            )
+        else:
+            copy("appservice.database")
         copy("appservice.database_opts")
 
         copy("appservice.id")
@@ -100,6 +138,37 @@ class BaseBridgeConfig(BaseFileConfig, BaseValidatableConfig, ABC):
         copy("bridge.management_room_text.welcome_unconnected")
         copy("bridge.management_room_text.additional_help")
         copy("bridge.management_room_multiple_messages")
+
+        copy("bridge.encryption.allow")
+        copy("bridge.encryption.default")
+        copy("bridge.encryption.require")
+        copy("bridge.encryption.appservice")
+        copy("bridge.encryption.msc4190")
+        copy("bridge.encryption.delete_keys.delete_outbound_on_ack")
+        copy("bridge.encryption.delete_keys.dont_store_outbound")
+        copy("bridge.encryption.delete_keys.ratchet_on_decrypt")
+        copy("bridge.encryption.delete_keys.delete_fully_used_on_decrypt")
+        copy("bridge.encryption.delete_keys.delete_prev_on_new_session")
+        copy("bridge.encryption.delete_keys.delete_on_device_delete")
+        copy("bridge.encryption.delete_keys.periodically_delete_expired")
+        copy("bridge.encryption.delete_keys.delete_outdated_inbound")
+        copy("bridge.encryption.verification_levels.receive")
+        copy("bridge.encryption.verification_levels.send")
+        copy("bridge.encryption.verification_levels.share")
+        copy("bridge.encryption.allow_key_sharing")
+        if self.get("bridge.encryption.key_sharing.allow", False):
+            helper.base["bridge.encryption.allow_key_sharing"] = True
+            require_verif = self.get("bridge.encryption.key_sharing.require_verification", True)
+            require_cs = self.get("bridge.encryption.key_sharing.require_cross_signing", False)
+            if require_verif:
+                helper.base["bridge.encryption.verification_levels.share"] = "verified"
+            elif not require_cs:
+                helper.base["bridge.encryption.verification_levels.share"] = "unverified"
+            # else: default (cross-signed-tofu)
+        copy("bridge.encryption.rotation.enable_custom")
+        copy("bridge.encryption.rotation.milliseconds")
+        copy("bridge.encryption.rotation.messages")
+        copy("bridge.encryption.rotation.disable_device_change_key_rotation")
 
         copy("bridge.relay.enabled")
         copy_dict("bridge.relay.message_formats", override_existing_map=False)
@@ -124,28 +193,26 @@ class BaseBridgeConfig(BaseFileConfig, BaseValidatableConfig, ABC):
             if "bridge.alias_template" in self
             else None
         )
-        group_id = (
-            {"group_id": self["appservice.community_id"]}
-            if self["appservice.community_id"]
-            else {}
-        )
 
         return {
             "users": [
                 {
                     "exclusive": True,
                     "regex": re.escape(f"@{username_format}:{homeserver}").replace(regex_ph, ".*"),
-                    **group_id,
                 }
             ],
-            "aliases": [
-                {
-                    "exclusive": True,
-                    "regex": re.escape(f"#{alias_format}:{homeserver}").replace(regex_ph, ".*"),
-                }
-            ]
-            if alias_format
-            else [],
+            "aliases": (
+                [
+                    {
+                        "exclusive": True,
+                        "regex": re.escape(f"#{alias_format}:{homeserver}").replace(
+                            regex_ph, ".*"
+                        ),
+                    }
+                ]
+                if alias_format
+                else []
+            ),
         }
 
     def generate_registration(self) -> None:
@@ -174,4 +241,7 @@ class BaseBridgeConfig(BaseFileConfig, BaseValidatableConfig, ABC):
 
         if self["appservice.ephemeral_events"]:
             self._registration["de.sorunome.msc2409.push_ephemeral"] = True
-            self._registration["push_ephemeral"] = True
+            self._registration["receive_ephemeral"] = True
+
+        if self["bridge.encryption.msc4190"]:
+            self._registration["io.element.msc4190"] = True

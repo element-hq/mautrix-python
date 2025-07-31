@@ -1,13 +1,16 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 from __future__ import annotations
 
+import secrets
+
 from mautrix.api import Method, Path
 from mautrix.errors import MatrixResponseError
 from mautrix.types import (
+    DeviceID,
     LoginFlowList,
     LoginResponse,
     LoginType,
@@ -40,7 +43,7 @@ class ClientAuthenticationMethods(BaseClientAPI):
         Returns:
             The list of login flows that the homeserver supports.
         """
-        resp = await self.api.request(Method.GET, Path.login)
+        resp = await self.api.request(Method.GET, Path.v3.login)
         try:
             return LoginFlowList.deserialize(resp)
         except KeyError:
@@ -93,12 +96,13 @@ class ClientAuthenticationMethods(BaseClientAPI):
             kwargs["device_id"] = self.device_id
         resp = await self.api.request(
             Method.POST,
-            Path.login,
+            Path.v3.login,
             {
                 "type": str(login_type),
                 "identifier": identifier.serialize(),
                 **kwargs,
             },
+            sensitive="password" in kwargs or "token" in kwargs,
         )
         resp_data = LoginResponse.deserialize(resp)
         if store_access_token:
@@ -115,6 +119,19 @@ class ClientAuthenticationMethods(BaseClientAPI):
                 self.api.base_url = base_url.rstrip("/")
         return resp_data
 
+    async def create_device_msc4190(self, device_id: str, initial_display_name: str) -> None:
+        """
+        Create a Device for a user of the homeserver using appservice interface defined in MSC4190
+        """
+        if len(device_id) == 0:
+            device_id = DeviceID(secrets.token_urlsafe(10))
+        self.api.as_user_id = self.mxid
+        await self.api.request(
+            Method.PUT, Path.v3.devices[device_id], {"display_name": initial_display_name}
+        )
+        self.api.as_device_id = device_id
+        self.device_id = device_id
+
     async def logout(self, clear_access_token: bool = True) -> None:
         """
         Invalidates an existing access token, so that it can no longer be used for authorization.
@@ -127,10 +144,10 @@ class ClientAuthenticationMethods(BaseClientAPI):
         Args:
             clear_access_token: Whether or not mautrix-python should forget the stored access token.
         """
-        await self.api.request(Method.POST, Path.logout)
+        await self.api.request(Method.POST, Path.v3.logout)
         if clear_access_token:
             self.api.token = ""
-            self.device_id = ""
+            self.device_id = DeviceID("")
 
     async def logout_all(self, clear_access_token: bool = True) -> None:
         """
@@ -151,10 +168,10 @@ class ClientAuthenticationMethods(BaseClientAPI):
         Args:
             clear_access_token: Whether or not mautrix-python should forget the stored access token.
         """
-        await self.api.request(Method.POST, Path.logout.all)
+        await self.api.request(Method.POST, Path.v3.logout.all)
         if clear_access_token:
             self.api.token = ""
-            self.device_id = ""
+            self.device_id = DeviceID("")
 
     # endregion
 
@@ -170,7 +187,7 @@ class ClientAuthenticationMethods(BaseClientAPI):
         Returns:
             The user ID and device ID of the current user.
         """
-        resp = await self.api.request(Method.GET, Path.account.whoami)
+        resp = await self.api.request(Method.GET, Path.v3.account.whoami)
         return WhoamiResponse.deserialize(resp)
 
     # endregion

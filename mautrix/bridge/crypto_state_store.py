@@ -1,4 +1,4 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -26,29 +26,6 @@ class BaseCryptoStateStore(StateStore, ABC):
     async def is_encrypted(self, room_id: RoomID) -> bool:
         portal = await self.get_portal(room_id)
         return portal.encrypted if portal else False
-
-
-try:
-    from mautrix.client.state_store.sqlalchemy import RoomState, UserProfile
-
-    class SQLCryptoStateStore(BaseCryptoStateStore):
-        @staticmethod
-        async def find_shared_rooms(user_id: UserID) -> list[RoomID]:
-            return [profile.room_id for profile in UserProfile.find_rooms_with_user(user_id)]
-
-        @staticmethod
-        async def get_encryption_info(room_id: RoomID) -> RoomEncryptionStateEventContent | None:
-            state = RoomState.get(room_id)
-            if not state:
-                return None
-            return state.encryption
-
-except ImportError:
-    if __optional_imports__:
-        raise
-    UserProfile = None
-    RoomState = None
-    SQLCryptoStateStore = None
 
 
 class PgCryptoStateStore(BaseCryptoStateStore):

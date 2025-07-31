@@ -1,38 +1,34 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 from __future__ import annotations
 
-from typing import ClassVar, Mapping
+from typing import ClassVar, Literal, Mapping
 from enum import Enum
 from json.decoder import JSONDecodeError
-from time import time
 from urllib.parse import quote as urllib_quote, urljoin as urllib_join
 import asyncio
+import inspect
 import json
 import logging
 import platform
-import sys
+import time
 
-from aiohttp import ClientSession, __version__ as aiohttp_version
+from aiohttp import ClientResponse, ClientSession, __version__ as aiohttp_version
 from aiohttp.client_exceptions import ClientError, ContentTypeError
 from yarl import URL
 
 from mautrix import __optional_imports__, __version__ as mautrix_version
 from mautrix.errors import MatrixConnectionError, MatrixRequestError, make_request_error
+from mautrix.util.async_body import AsyncBody, async_iter_bytes
 from mautrix.util.logging import TraceLogger
 from mautrix.util.opt_prometheus import Counter
 
-if sys.version_info >= (3, 8):
-    from typing import Literal
-else:
-    from typing_extensions import Literal
-
 if __optional_imports__:
     # Safe to import, but it's not actually needed, so don't force-import the whole types module.
-    from mautrix.types import JSON
+    from mautrix.types import JSON, DeviceID, UserID
 
 API_CALLS = Counter(
     name="bridge_matrix_api_calls",
@@ -52,9 +48,8 @@ class APIPath(Enum):
     These don't start with a slash so they can be used nicely with yarl.
     """
 
-    CLIENT = "_matrix/client/r0"
-    CLIENT_UNSTABLE = "_matrix/client/unstable"
-    MEDIA = "_matrix/media/r0"
+    CLIENT = "_matrix/client"
+    MEDIA = "_matrix/media"
     SYNAPSE_ADMIN = "_synapse/admin"
 
     def __repr__(self):
@@ -88,8 +83,8 @@ class PathBuilder:
         >>> from mautrix.api import Path
         >>> room_id = "!foo:example.com"
         >>> event_id = "$bar:example.com"
-        >>> str(Path.rooms[room_id].event[event_id])
-        "_matrix/client/r0/rooms/%21foo%3Aexample.com/event/%24bar%3Aexample.com"
+        >>> str(Path.v3.rooms[room_id].event[event_id])
+        "_matrix/client/v3/rooms/%21foo%3Aexample.com/event/%24bar%3Aexample.com"
     """
 
     def __init__(self, path: str | APIPath = "") -> None:
@@ -129,36 +124,34 @@ class PathBuilder:
             return self
         return PathBuilder(f"{self.path}/{self._quote(str(append))}")
 
+    def replace(self, find: str, replace: str) -> PathBuilder:
+        return PathBuilder(self.path.replace(find, replace))
+
 
 ClientPath = PathBuilder(APIPath.CLIENT)
 ClientPath.__doc__ = """
-A path builder with the standard client r0 prefix ( ``/_matrix/client/r0``, :attr:`APIPath.CLIENT`)
+A path builder with the standard client prefix ( ``/_matrix/client``, :attr:`APIPath.CLIENT`).
 """
 Path = PathBuilder(APIPath.CLIENT)
 Path.__doc__ = """A shorter alias for :attr:`ClientPath`"""
-UnstableClientPath = PathBuilder(APIPath.CLIENT_UNSTABLE)
-UnstableClientPath.__doc__ = """
-A path builder for client endpoints that haven't reached the spec yet
-(``/_matrix/client/unstable``, :attr:`APIPath.CLIENT_UNSTABLE`)
-"""
 MediaPath = PathBuilder(APIPath.MEDIA)
 MediaPath.__doc__ = """
-A path builder for standard media r0 paths (``/_matrix/media/r0``, :attr:`APIPath.MEDIA`)
+A path builder with the standard media prefix (``/_matrix/media``, :attr:`APIPath.MEDIA`)
 
 Examples:
     >>> from mautrix.api import MediaPath
-    >>> str(MediaPath.config)
-    "_matrix/media/r0/config"
+    >>> str(MediaPath.v3.config)
+    "_matrix/media/v3/config"
 """
 SynapseAdminPath = PathBuilder(APIPath.SYNAPSE_ADMIN)
 SynapseAdminPath.__doc__ = """
 A path builder for synapse-specific admin API paths
-(``/_synapse/admin/v1``, :attr:`APIPath.SYNAPSE_ADMIN`)
+(``/_synapse/admin``, :attr:`APIPath.SYNAPSE_ADMIN`)
 
 Examples:
     >>> from mautrix.api import SynapseAdminPath
     >>> user_id = "@user:example.com"
-    >>> str(SynapseAdminPath.users[user_id]/login)
+    >>> str(SynapseAdminPath.v1.users[user_id]/login)
     "_synapse/admin/v1/users/%40user%3Aexample.com/login"
 """
 
@@ -200,6 +193,13 @@ class HTTPAPI:
     default_retry_count: int
     """The default retry count to use if a custom value is not passed to :meth:`request`"""
 
+    as_user_id: UserID | None
+    """An optional user ID to set as the user_id query parameter for appservice requests."""
+    as_device_id: DeviceID | None
+    """
+    An optional device ID to set as the user_id query parameter for appservice requests (MSC3202).
+    """
+
     def __init__(
         self,
         base_url: URL | str,
@@ -210,6 +210,8 @@ class HTTPAPI:
         txn_id: int = 0,
         log: TraceLogger | None = None,
         loop: asyncio.AbstractEventLoop | None = None,
+        as_user_id: UserID | None = None,
+        as_device_id: UserID | None = None,
     ) -> None:
         """
         Args:
@@ -219,6 +221,10 @@ class HTTPAPI:
             txn_id: The outgoing transaction ID to start with.
             log: The :class:`logging.Logger` instance to log requests with.
             default_retry_count: Default number of retries to do when encountering network errors.
+            as_user_id: An optional user ID to set as the user_id query parameter for
+                appservice requests.
+            as_device_id: An optional device ID to set as the user_id query parameter for
+                appservice requests (MSC3202).
         """
         self.base_url = URL(base_url)
         self.token = token
@@ -226,6 +232,8 @@ class HTTPAPI:
         self.session = client_session or ClientSession(
             loop=loop, headers={"User-Agent": self.default_ua}
         )
+        self.as_user_id = as_user_id
+        self.as_device_id = as_device_id
         if txn_id is not None:
             self.txn_id = txn_id
         if default_retry_count is not None:
@@ -237,20 +245,21 @@ class HTTPAPI:
         self,
         method: Method,
         url: URL,
-        content: bytes | str,
+        content: bytes | bytearray | str | AsyncBody,
         query_params: dict[str, str],
         headers: dict[str, str],
-    ) -> JSON:
+    ) -> tuple[JSON, ClientResponse]:
         request = self.session.request(
             str(method), url, data=content, params=query_params, headers=headers
         )
         async with request as response:
             if response.status < 200 or response.status >= 300:
-                errcode = message = None
+                errcode = unstable_errcode = message = None
                 try:
                     response_data = await response.json()
                     errcode = response_data["errcode"]
                     message = response_data["error"]
+                    unstable_errcode = response_data.get("org.matrix.msc3848.unstable.errcode")
                 except (JSONDecodeError, ContentTypeError, KeyError):
                     pass
                 raise make_request_error(
@@ -258,37 +267,62 @@ class HTTPAPI:
                     text=await response.text(),
                     errcode=errcode,
                     message=message,
+                    unstable_errcode=unstable_errcode,
                 )
-            return await response.json()
+            return await response.json(), response
 
     def _log_request(
         self,
         method: Method,
-        path: PathBuilder,
-        content: str | bytes,
+        url: URL,
+        content: str | bytes | bytearray | AsyncBody | None,
         orig_content,
         query_params: dict[str, str],
+        headers: dict[str, str],
         req_id: int,
+        sensitive: bool,
     ) -> None:
         if not self.log:
             return
-        log_content = content if not isinstance(content, bytes) else f"<{len(content)} bytes>"
+        if isinstance(content, (bytes, bytearray)):
+            log_content = f"<{len(content)} bytes>"
+        elif inspect.isasyncgen(content):
+            size = headers.get("Content-Length", None)
+            log_content = f"<{size} async bytes>" if size else f"<stream with unknown length>"
+        elif sensitive:
+            log_content = f"<{len(content)} sensitive bytes>"
+        else:
+            log_content = content
         as_user = query_params.get("user_id", None)
-        level = 1 if path == Path.sync else 5
+        level = 5 if url.path.endswith("/v3/sync") else 10
         self.log.log(
             level,
-            f"{method}#{req_id} /{path} {log_content}".strip(" "),
+            f"req #{req_id}: {method} {url} {log_content}".strip(" "),
             extra={
                 "matrix_http_request": {
                     "req_id": req_id,
                     "method": str(method),
-                    "path": str(path),
+                    "url": str(url),
                     "content": (
-                        orig_content if isinstance(orig_content, (dict, list)) else log_content
+                        orig_content
+                        if isinstance(orig_content, (dict, list)) and not sensitive
+                        else log_content
                     ),
                     "user": as_user,
                 }
             },
+        )
+
+    def _log_request_done(
+        self, path: PathBuilder | str, req_id: int, duration: float, status: int
+    ) -> None:
+        level = 5 if path == Path.v3.sync else 10
+        duration_str = f"{duration * 1000:.1f}ms" if duration < 1 else f"{duration:.3f}s"
+        path_without_prefix = f"/{path}".replace("/_matrix/client", "")
+        self.log.log(
+            level,
+            f"req #{req_id} ({path_without_prefix}) completed in {duration_str} "
+            f"with status {status}",
         )
 
     def _full_path(self, path: PathBuilder | str) -> str:
@@ -300,15 +334,27 @@ class HTTPAPI:
             base_path += "/"
         return urllib_join(base_path, path)
 
+    def log_download_request(self, url: URL, query_params: dict[str, str]) -> int:
+        req_id = _next_global_req_id()
+        self._log_request(Method.GET, url, None, None, query_params, {}, req_id, False)
+        return req_id
+
+    def log_download_request_done(
+        self, url: URL, req_id: int, duration: float, status: int
+    ) -> None:
+        self._log_request_done(url.path.removeprefix("/_matrix/media/"), req_id, duration, status)
+
     async def request(
         self,
         method: Method,
         path: PathBuilder | str,
-        content: dict | list | bytes | str | None = None,
+        content: dict | list | bytes | bytearray | str | AsyncBody | None = None,
         headers: dict[str, str] | None = None,
         query_params: Mapping[str, str] | None = None,
         retry_count: int | None = None,
         metrics_method: str = "",
+        min_iter_size: int = 25 * 1024 * 1024,
+        sensitive: bool = False,
     ) -> JSON:
         """
         Make a raw Matrix API request.
@@ -325,6 +371,10 @@ class HTTPAPI:
             retry_count: Number of times to retry if the homeserver isn't reachable.
                          Defaults to :attr:`default_retry_count`.
             metrics_method: Name of the method to include in Prometheus timing metrics.
+            min_iter_size: If the request body is larger than this value, it will be passed to
+                           aiohttp as an async iterable to stop it from copying the whole thing
+                           in memory.
+            sensitive: If True, the request content will not be logged.
 
         Returns:
             The parsed response JSON.
@@ -335,6 +385,11 @@ class HTTPAPI:
         query_params = query_params or {}
         if isinstance(query_params, dict):
             query_params = {k: v for k, v in query_params.items() if v is not None}
+        if self.as_user_id:
+            query_params["user_id"] = self.as_user_id
+        if self.as_device_id:
+            query_params["org.matrix.msc3202.device_id"] = self.as_device_id
+            query_params["device_id"] = self.as_device_id
 
         if method != Method.GET:
             content = content or {}
@@ -351,12 +406,27 @@ class HTTPAPI:
 
         if retry_count is None:
             retry_count = self.default_retry_count
+        if inspect.isasyncgen(content):
+            # Can't retry with non-static body
+            retry_count = 0
+        do_fake_iter = content and hasattr(content, "__len__") and len(content) > min_iter_size
+        if do_fake_iter:
+            headers["Content-Length"] = str(len(content))
         backoff = 4
+        log_url = full_url.with_query(query_params)
         while True:
-            self._log_request(method, path, content, orig_content, query_params, req_id)
+            self._log_request(
+                method, log_url, content, orig_content, query_params, headers, req_id, sensitive
+            )
             API_CALLS.labels(method=metrics_method).inc()
+            req_content = async_iter_bytes(content) if do_fake_iter else content
+            start = time.monotonic()
             try:
-                return await self._send(method, full_url, content, query_params, headers or {})
+                resp_data, resp = await self._send(
+                    method, full_url, req_content, query_params, headers or {}
+                )
+                self._log_request_done(path, req_id, time.monotonic() - start, resp.status)
+                return resp_data
             except MatrixRequestError as e:
                 API_CALLS_FAILED.labels(method=metrics_method).inc()
                 if retry_count > 0 and e.http_status in (502, 503, 504):
@@ -365,6 +435,7 @@ class HTTPAPI:
                         f"retrying in {backoff} seconds"
                     )
                 else:
+                    self._log_request_done(path, req_id, time.monotonic() - start, e.http_status)
                     raise
             except ClientError as e:
                 API_CALLS_FAILED.labels(method=metrics_method).inc()
@@ -384,10 +455,14 @@ class HTTPAPI:
     def get_txn_id(self) -> str:
         """Get a new unique transaction ID."""
         self.txn_id += 1
-        return f"mautrix-python_R{self.txn_id}@T{int(time() * 1000)}"
+        return f"mautrix-python_{time.time_ns()}_{self.txn_id}"
 
     def get_download_url(
-        self, mxc_uri: str, download_type: Literal["download", "thumbnail"] = "download"
+        self,
+        mxc_uri: str,
+        download_type: Literal["download", "thumbnail"] = "download",
+        file_name: str | None = None,
+        authenticated: bool = False,
     ) -> URL:
         """
         Get the full HTTP URL to download a ``mxc://`` URI.
@@ -395,6 +470,8 @@ class HTTPAPI:
         Args:
             mxc_uri: The MXC URI whose full URL to get.
             download_type: The type of download ("download" or "thumbnail").
+            file_name: Optionally, a file name to include in the download URL.
+            authenticated: Whether to use the new authenticated download endpoint in Matrix v1.11.
 
         Returns:
             The full HTTP URL.
@@ -403,11 +480,38 @@ class HTTPAPI:
             ValueError: If `mxc_uri` doesn't begin with ``mxc://``.
 
         Examples:
-            >>> api = HTTPAPI(...)
+            >>> api = HTTPAPI(base_url="https://matrix-client.matrix.org", ...)
             >>> api.get_download_url("mxc://matrix.org/pqjkOuKZ1ZKRULWXgz2IVZV6")
-            "https://matrix.org/_matrix/media/r0/download/matrix.org/pqjkOuKZ1ZKRULWXgz2IVZV6"
+            "https://matrix-client.matrix.org/_matrix/media/v3/download/matrix.org/pqjkOuKZ1ZKRULWXgz2IVZV6"
+            >>> api.get_download_url("mxc://matrix.org/pqjkOuKZ1ZKRULWXgz2IVZV6", file_name="hello.png")
+            "https://matrix-client.matrix.org/_matrix/media/v3/download/matrix.org/pqjkOuKZ1ZKRULWXgz2IVZV6/hello.png"
+        """
+        server_name, media_id = self.parse_mxc_uri(mxc_uri)
+        if authenticated:
+            url = self.base_url / str(APIPath.CLIENT) / "v1" / "media"
+        else:
+            url = self.base_url / str(APIPath.MEDIA) / "v3"
+        url = url / download_type / server_name / media_id
+        if file_name:
+            url /= file_name
+        return url
+
+    @staticmethod
+    def parse_mxc_uri(mxc_uri: str) -> tuple[str, str]:
+        """
+        Parse a ``mxc://`` URI.
+
+        Args:
+            mxc_uri: The MXC URI to parse.
+
+        Returns:
+            A tuple containing the server and media ID of the MXC URI.
+
+        Raises:
+            ValueError: If `mxc_uri` doesn't begin with ``mxc://``.
         """
         if mxc_uri.startswith("mxc://"):
-            return self.base_url / str(APIPath.MEDIA) / download_type / mxc_uri[6:]
+            server_name, media_id = mxc_uri[6:].split("/")
+            return server_name, media_id
         else:
             raise ValueError("MXC URI did not begin with `mxc://`")

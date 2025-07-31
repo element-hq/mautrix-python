@@ -1,7 +1,6 @@
 from .account import OlmAccount
 from .key_share import RejectKeyShare
-from .sessions import InboundGroupSession, OutboundGroupSession, Session
-from .types import DecryptedOlmEvent, DeviceIdentity, TrustState
+from .sessions import InboundGroupSession, OutboundGroupSession, RatchetSafety, Session
 
 # These have to be last
 from .store import (  # isort: skip
@@ -13,3 +12,18 @@ from .store import (  # isort: skip
 )
 
 from .machine import OlmMachine  # isort: skip
+
+__all__ = [
+    "OlmAccount",
+    "RejectKeyShare",
+    "InboundGroupSession",
+    "OutboundGroupSession",
+    "Session",
+    "CryptoStore",
+    "MemoryCryptoStore",
+    "PgCryptoStateStore",
+    "PgCryptoStore",
+    "StateStore",
+    "OlmMachine",
+    "attachments",
+]

@@ -1,18 +1,18 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 from __future__ import annotations
 
-from typing import Any, Awaitable, Iterable
+from typing import Any, Awaitable, Iterable, TypeVar
 from urllib.parse import quote as urllib_quote
 
-from mautrix import __optional_imports__
-from mautrix.api import Method, Path, UnstableClientPath
+from mautrix.api import Method, Path
 from mautrix.client import ClientAPI, StoreUpdatingAPI
 from mautrix.errors import (
     IntentError,
+    MAlreadyJoined,
     MatrixRequestError,
     MBadState,
     MForbidden,
@@ -22,7 +22,10 @@ from mautrix.errors import (
 from mautrix.types import (
     JSON,
     BatchID,
+    BatchSendEvent,
     BatchSendResponse,
+    BatchSendStateEvent,
+    BeeperBatchSendResponse,
     ContentURI,
     EventContent,
     EventID,
@@ -31,7 +34,6 @@ from mautrix.types import (
     JoinRulesStateEventContent,
     Member,
     Membership,
-    MessageEvent,
     PowerLevelStateEventContent,
     PresenceState,
     RoomAvatarStateEventContent,
@@ -39,20 +41,12 @@ from mautrix.types import (
     RoomNameStateEventContent,
     RoomPinnedEventsStateEventContent,
     RoomTopicStateEventContent,
-    StateEvent,
     StateEventContent,
     UserID,
 )
 from mautrix.util.logging import TraceLogger
 
 from .. import api as as_api, state_store as ss
-
-try:
-    import magic
-except ImportError:
-    if __optional_imports__:
-        raise
-    magic = None
 
 
 def quote(*args, **kwargs):
@@ -77,6 +71,8 @@ ENSURE_REGISTERED_METHODS = (
     ClientAPI.search_users,
     ClientAPI.set_displayname,
     ClientAPI.set_avatar_url,
+    ClientAPI.beeper_update_profile,
+    ClientAPI.create_mxc,
     ClientAPI.upload_media,
     ClientAPI.send_receipt,
     ClientAPI.set_fully_read_marker,
@@ -97,6 +93,8 @@ ENSURE_JOINED_METHODS = (
 )
 
 DOUBLE_PUPPET_SOURCE_KEY = "fi.mau.double_puppet_source"
+
+T = TypeVar("T")
 
 
 class IntentAPI(StoreUpdatingAPI):
@@ -120,6 +118,8 @@ class IntentAPI(StoreUpdatingAPI):
     ) -> None:
         super().__init__(mxid=mxid, api=api, state_store=state_store)
         self.bot = bot
+        if bot is not None:
+            self.versions_cache = bot.versions_cache
         self.log = api.base_log.getChild("intent")
 
         for method in ENSURE_REGISTERED_METHODS:
@@ -138,13 +138,19 @@ class IntentAPI(StoreUpdatingAPI):
                 room_id = kwargs.get("room_id", None)
                 if not room_id:
                     room_id = args[0]
-                await __self.ensure_joined(room_id)
+                ensure_joined = kwargs.pop("ensure_joined", True)
+                if ensure_joined:
+                    await __self.ensure_joined(room_id)
                 return await __method(*args, **kwargs)
 
             setattr(self, method.__name__, wrapper)
 
     def user(
-        self, user_id: UserID, token: str | None = None, base_url: str | None = None
+        self,
+        user_id: UserID,
+        token: str | None = None,
+        base_url: str | None = None,
+        as_token: bool = False,
     ) -> IntentAPI:
         """
         Get the intent API for a specific user.
@@ -157,15 +163,17 @@ class IntentAPI(StoreUpdatingAPI):
             user_id: The Matrix ID of the user whose intent API to get.
             token: The access token to use for the Matrix ID.
             base_url: An optional URL to use for API requests.
+            as_token: Whether the provided token is actually another as_token
+                (meaning the ``user_id`` query parameter needs to be used).
 
         Returns:
             The IntentAPI for the given user.
         """
         if not self.bot:
-            return self.api.intent(user_id, token, base_url)
+            return self.api.intent(user_id, token, base_url, real_user_as_token=as_token)
         else:
             self.log.warning("Called IntentAPI#user() of child intent object.")
-            return self.bot.api.intent(user_id, token, base_url)
+            return self.bot.api.intent(user_id, token, base_url, real_user_as_token=as_token)
 
     # region User actions
 
@@ -183,7 +191,7 @@ class IntentAPI(StoreUpdatingAPI):
         Args:
             presence: The online status of the user.
             status: The status message.
-            ignore_cache: Whether or not to set presence even if the cache says the presence is
+            ignore_cache: Whether to set presence even if the cache says the presence is
                 already set to that value.
         """
         await self.ensure_registered()
@@ -195,10 +203,18 @@ class IntentAPI(StoreUpdatingAPI):
     # endregion
     # region Room actions
 
+    def _add_source_key(self, content: T = None) -> T:
+        if self.api.is_real_user and self.api.bridge_name:
+            if not content:
+                content = {}
+            content[DOUBLE_PUPPET_SOURCE_KEY] = self.api.bridge_name
+        return content
+
     async def invite_user(
         self,
         room_id: RoomID,
         user_id: UserID,
+        reason: str | None = None,
         check_cache: bool = False,
         extra_content: dict[str, Any] | None = None,
     ) -> None:
@@ -218,6 +234,8 @@ class IntentAPI(StoreUpdatingAPI):
         Args:
             room_id: The ID of the room to which to invite the user.
             user_id: The fully qualified user ID of the invitee.
+            reason: The reason the user was invited. This will be supplied as the ``reason`` on
+                the `m.room.member`_ event.
             check_cache: If ``True``, the function will first check the state store, and not do
                          anything if the state store says the user is already invited or joined.
             extra_content: Additional properties for the invite event content.
@@ -230,35 +248,95 @@ class IntentAPI(StoreUpdatingAPI):
                 await self.state_store.get_membership(room_id, user_id) not in ok_states
             )
             if do_invite:
-                await super().invite_user(room_id, user_id, extra_content=extra_content)
+                extra_content = self._add_source_key(extra_content)
+                await super().invite_user(
+                    room_id, user_id, reason=reason, extra_content=extra_content
+                )
                 await self.state_store.invited(room_id, user_id)
+        except MAlreadyJoined as e:
+            await self.state_store.joined(room_id, user_id)
         except MatrixRequestError as e:
-            if e.errcode == "M_FORBIDDEN" and "is already in the room" in e.message:
+            # TODO remove this once MSC3848 is released and minimum spec version is bumped
+            if e.errcode == "M_FORBIDDEN" and (
+                "already in the room" in e.message or "is already joined to room" in e.message
+            ):
                 await self.state_store.joined(room_id, user_id)
             else:
-                raise IntentError(f"Failed to invite {user_id} to {room_id}", e)
+                raise
+
+    async def kick_user(
+        self,
+        room_id: RoomID,
+        user_id: UserID,
+        reason: str = "",
+        extra_content: dict[str, JSON] | None = None,
+    ) -> None:
+        extra_content = self._add_source_key(extra_content)
+        await super().kick_user(room_id, user_id, reason=reason, extra_content=extra_content)
+
+    async def ban_user(
+        self,
+        room_id: RoomID,
+        user_id: UserID,
+        reason: str = "",
+        extra_content: dict[str, JSON] | None = None,
+    ) -> None:
+        extra_content = self._add_source_key(extra_content)
+        await super().ban_user(room_id, user_id, reason=reason, extra_content=extra_content)
+
+    async def unban_user(
+        self,
+        room_id: RoomID,
+        user_id: UserID,
+        reason: str = "",
+        extra_content: dict[str, JSON] | None = None,
+    ) -> None:
+        extra_content = self._add_source_key(extra_content)
+        await super().unban_user(room_id, user_id, reason=reason, extra_content=extra_content)
+
+    async def join_room_by_id(
+        self,
+        room_id: RoomID,
+        third_party_signed: JSON = None,
+        extra_content: dict[str, JSON] | None = None,
+    ) -> RoomID:
+        extra_content = self._add_source_key(extra_content)
+        return await super().join_room_by_id(
+            room_id, third_party_signed=third_party_signed, extra_content=extra_content
+        )
+
+    async def leave_room(
+        self,
+        room_id: RoomID,
+        reason: str | None = None,
+        extra_content: dict[str, JSON] | None = None,
+        raise_not_in_room: bool = False,
+    ) -> None:
+        extra_content = self._add_source_key(extra_content)
+        await super().leave_room(room_id, reason, extra_content, raise_not_in_room)
 
     def set_room_avatar(
         self, room_id: RoomID, avatar_url: ContentURI | None, **kwargs
     ) -> Awaitable[EventID]:
-        return self.send_state_event(
-            room_id, EventType.ROOM_AVATAR, RoomAvatarStateEventContent(url=avatar_url), **kwargs
-        )
+        content = RoomAvatarStateEventContent(url=avatar_url)
+        content = self._add_source_key(content)
+        return self.send_state_event(room_id, EventType.ROOM_AVATAR, content, **kwargs)
 
     def set_room_name(self, room_id: RoomID, name: str, **kwargs) -> Awaitable[EventID]:
-        return self.send_state_event(
-            room_id, EventType.ROOM_NAME, RoomNameStateEventContent(name=name), **kwargs
-        )
+        content = RoomNameStateEventContent(name=name)
+        content = self._add_source_key(content)
+        return self.send_state_event(room_id, EventType.ROOM_NAME, content, **kwargs)
 
     def set_room_topic(self, room_id: RoomID, topic: str, **kwargs) -> Awaitable[EventID]:
-        return self.send_state_event(
-            room_id, EventType.ROOM_TOPIC, RoomTopicStateEventContent(topic=topic), **kwargs
-        )
+        content = RoomTopicStateEventContent(topic=topic)
+        content = self._add_source_key(content)
+        return self.send_state_event(room_id, EventType.ROOM_TOPIC, content, **kwargs)
 
     async def get_power_levels(
-        self, room_id: RoomID, ignore_cache: bool = False
+        self, room_id: RoomID, ignore_cache: bool = False, ensure_joined: bool = True
     ) -> PowerLevelStateEventContent:
-        await self.ensure_joined(room_id)
+        if ensure_joined:
+            await self.ensure_joined(room_id)
         if not ignore_cache:
             levels = await self.state_store.get_power_levels(room_id)
             if levels:
@@ -267,12 +345,17 @@ class IntentAPI(StoreUpdatingAPI):
             levels = await self.get_state_event(room_id, EventType.ROOM_POWER_LEVELS)
         except MNotFound:
             levels = PowerLevelStateEventContent()
+        except MForbidden:
+            if not ensure_joined:
+                return PowerLevelStateEventContent()
+            raise
         await self.state_store.set_power_levels(room_id, levels)
         return levels
 
     async def set_power_levels(
         self, room_id: RoomID, content: PowerLevelStateEventContent, **kwargs
     ) -> EventID:
+        content = self._add_source_key(content)
         response = await self.send_state_event(
             room_id, EventType.ROOM_POWER_LEVELS, content, **kwargs
         )
@@ -291,12 +374,9 @@ class IntentAPI(StoreUpdatingAPI):
     def set_pinned_messages(
         self, room_id: RoomID, events: list[EventID], **kwargs
     ) -> Awaitable[EventID]:
-        return self.send_state_event(
-            room_id,
-            EventType.ROOM_PINNED_EVENTS,
-            RoomPinnedEventsStateEventContent(pinned=events),
-            **kwargs,
-        )
+        content = RoomPinnedEventsStateEventContent(pinned=events)
+        content = self._add_source_key(content)
+        return self.send_state_event(room_id, EventType.ROOM_PINNED_EVENTS, content, **kwargs)
 
     async def pin_message(self, room_id: RoomID, event_id: EventID) -> None:
         events = await self.get_pinned_messages(room_id)
@@ -311,12 +391,9 @@ class IntentAPI(StoreUpdatingAPI):
             await self.set_pinned_messages(room_id, events)
 
     async def set_join_rule(self, room_id: RoomID, join_rule: JoinRule, **kwargs):
-        await self.send_state_event(
-            room_id,
-            EventType.ROOM_JOIN_RULES,
-            JoinRulesStateEventContent(join_rule=join_rule),
-            **kwargs,
-        )
+        content = JoinRulesStateEventContent(join_rule=join_rule)
+        content = self._add_source_key(content)
+        await self.send_state_event(room_id, EventType.ROOM_JOIN_RULES, content, **kwargs)
 
     async def get_room_displayname(
         self, room_id: RoomID, user_id: UserID, ignore_cache=False
@@ -339,15 +416,10 @@ class IntentAPI(StoreUpdatingAPI):
     async def set_typing(
         self,
         room_id: RoomID,
-        is_typing: bool = True,
-        timeout: int = 5000,
-        ignore_cache: bool = False,
+        timeout: int = 0,
     ) -> None:
         await self.ensure_joined(room_id)
-        if not ignore_cache and is_typing == self.state_store.is_typing(room_id, self.mxid):
-            return
-        await super().set_typing(room_id, timeout if is_typing else 0)
-        self.state_store.set_typing(room_id, self.mxid, is_typing, timeout)
+        await super().set_typing(room_id, timeout)
 
     async def error_and_leave(
         self, room_id: RoomID, text: str | None = None, html: str | None = None
@@ -360,10 +432,7 @@ class IntentAPI(StoreUpdatingAPI):
         self, room_id: RoomID, event_type: EventType, content: EventContent, **kwargs
     ) -> EventID:
         await self._ensure_has_power_level_for(room_id, event_type)
-
-        if self.api.is_real_user and self.api.bridge_name is not None:
-            content[DOUBLE_PUPPET_SOURCE_KEY] = self.api.bridge_name
-
+        content = self._add_source_key(content)
         return await super().send_message_event(room_id, event_type, content, **kwargs)
 
     async def redact(
@@ -375,10 +444,7 @@ class IntentAPI(StoreUpdatingAPI):
         **kwargs,
     ) -> EventID:
         await self._ensure_has_power_level_for(room_id, EventType.ROOM_REDACTION)
-        if self.api.is_real_user and self.api.bridge_name:
-            if not extra_content:
-                extra_content = {}
-            extra_content[DOUBLE_PUPPET_SOURCE_KEY] = self.api.bridge_name
+        extra_content = self._add_source_key(extra_content)
         return await super().redact(
             room_id, event_id, reason, extra_content=extra_content, **kwargs
         )
@@ -392,6 +458,7 @@ class IntentAPI(StoreUpdatingAPI):
         **kwargs,
     ) -> EventID:
         await self._ensure_has_power_level_for(room_id, event_type, state_key=state_key)
+        content = self._add_source_key(content)
         return await super().send_state_event(room_id, event_type, content, state_key, **kwargs)
 
     async def get_room_members(
@@ -431,14 +498,24 @@ class IntentAPI(StoreUpdatingAPI):
             )
             self.state_store.set_read(room_id, self.mxid, event_id)
 
+    async def appservice_ping(self, appservice_id: str, txn_id: str | None = None) -> int:
+        resp = await self.api.request(
+            Method.POST,
+            Path.v1.appservice[appservice_id].ping,
+            content={"transaction_id": txn_id} if txn_id is not None else {},
+        )
+        return resp.get("duration_ms") or -1
+
     async def batch_send(
         self,
         room_id: RoomID,
         prev_event_id: EventID,
         *,
         batch_id: BatchID | None = None,
-        events: Iterable[MessageEvent],
-        state_events_at_start: Iterable[StateEvent] = None,
+        events: Iterable[BatchSendEvent],
+        state_events_at_start: Iterable[BatchSendStateEvent] = (),
+        beeper_new_messages: bool = False,
+        beeper_mark_read_by: UserID | None = None,
     ) -> BatchSendResponse:
         """
         Send a batch of historical events into a room. See `MSC2716`_ for more info.
@@ -446,6 +523,9 @@ class IntentAPI(StoreUpdatingAPI):
         .. _MSC2716: https://github.com/matrix-org/matrix-doc/pull/2716
 
         .. versionadded:: v0.12.5
+
+        .. deprecated:: v0.20.3
+            MSC2716 was abandoned by upstream and Beeper has forked the endpoint.
 
         Args:
             room_id: The room ID to send the events to.
@@ -456,14 +536,20 @@ class IntentAPI(StoreUpdatingAPI):
             state_events_at_start: The state events to send at the start of the batch.
                                    These will be sent as outlier events, which means they won't be
                                    a part of the actual room state.
+            beeper_new_messages: Custom flag to tell the server that the messages can be sent to
+                                 the end of the room as normal messages instead of history.
 
         Returns:
             All the event IDs generated, plus a batch ID that can be passed back to this method.
         """
-        path = UnstableClientPath["org.matrix.msc2716"].rooms[room_id].batch_send
-        query = {"prev_event_id": prev_event_id}
+        path = Path.unstable["org.matrix.msc2716"].rooms[room_id].batch_send
+        query: JSON = {"prev_event_id": prev_event_id}
         if batch_id:
             query["batch_id"] = batch_id
+        if beeper_new_messages:
+            query["com.beeper.new_messages"] = "true"
+        if beeper_mark_read_by:
+            query["com.beeper.mark_read_by"] = beeper_mark_read_by
         resp = await self.api.request(
             Method.POST,
             path,
@@ -474,6 +560,58 @@ class IntentAPI(StoreUpdatingAPI):
             },
         )
         return BatchSendResponse.deserialize(resp)
+
+    async def beeper_batch_send(
+        self,
+        room_id: RoomID,
+        events: Iterable[BatchSendEvent],
+        *,
+        forward: bool = False,
+        forward_if_no_messages: bool = False,
+        send_notification: bool = False,
+        mark_read_by: UserID | None = None,
+    ) -> BeeperBatchSendResponse:
+        """
+        Send a batch of events into a room. Only for Beeper/hungryserv.
+
+        .. versionadded:: v0.20.3
+
+        Args:
+            room_id: The room ID to send the events to.
+            events: The events to send.
+            forward: Send events to the end of the room instead of the beginning
+            forward_if_no_messages: Send events to the end of the room, but only if there are no
+                messages in the room. If there are messages, send the new messages to the beginning.
+            send_notification: Send a push notification for the new messages.
+                Only applies when sending to the end of the room.
+            mark_read_by: Send a read receipt from the given user ID atomically.
+
+        Returns:
+            All the event IDs generated.
+        """
+        body = {
+            "events": [evt.serialize() for evt in events],
+        }
+        if forward:
+            body["forward"] = forward
+        elif forward_if_no_messages:
+            body["forward_if_no_messages"] = forward_if_no_messages
+        if send_notification:
+            body["send_notification"] = send_notification
+        if mark_read_by:
+            body["mark_read_by"] = mark_read_by
+        resp = await self.api.request(
+            Method.POST,
+            Path.unstable["com.beeper.backfill"].rooms[room_id].batch_send,
+            content=body,
+        )
+        return BeeperBatchSendResponse.deserialize(resp)
+
+    async def beeper_delete_room(self, room_id: RoomID) -> None:
+        versions = await self.versions()
+        if not versions.supports("com.beeper.room_yeeting"):
+            raise RuntimeError("Homeserver does not support yeeting rooms")
+        await self.api.request(Method.POST, Path.unstable["com.beeper.yeet"].rooms[room_id].delete)
 
     # endregion
     # region Ensure functions
@@ -540,7 +678,7 @@ class IntentAPI(StoreUpdatingAPI):
             "inhibit_login": True,
         }
         query_params = {"kind": "user"}
-        return self.api.request(Method.POST, Path.register, content, query_params=query_params)
+        return self.api.request(Method.POST, Path.v3.register, content, query_params=query_params)
 
     async def ensure_registered(self) -> None:
         """
@@ -556,8 +694,6 @@ class IntentAPI(StoreUpdatingAPI):
             await self._register()
         except MUserInUse:
             pass
-        except MatrixRequestError as e:
-            raise IntentError(f"Failed to register {self.mxid}", e)
         await self.state_store.registered(self.mxid)
 
     async def _ensure_has_power_level_for(
@@ -573,7 +709,7 @@ class IntentAPI(StoreUpdatingAPI):
             return
         if not await self.state_store.has_power_levels_cached(room_id):
             # TODO add option to not try to fetch power levels from server
-            await self.get_power_levels(room_id, ignore_cache=True)
+            await self.get_power_levels(room_id, ignore_cache=True, ensure_joined=False)
         if not await self.state_store.has_power_level(room_id, self.mxid, event_type):
             # TODO implement something better
             raise IntentError(

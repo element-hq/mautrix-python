@@ -1,12 +1,14 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 from __future__ import annotations
 
-from typing import Any, Type
+from typing import Any
 from abc import ABC, abstractmethod
+from enum import Enum
+import asyncio
 import sys
 
 from aiohttp import web
@@ -17,7 +19,7 @@ from mautrix.appservice import AppService, ASStateStore
 from mautrix.client.state_store.asyncpg import PgStateStore as PgClientStateStore
 from mautrix.errors import MExclusive, MUnknownToken
 from mautrix.types import RoomID, UserID
-from mautrix.util.async_db import Database, UpgradeTable
+from mautrix.util.async_db import Database, DatabaseException, UpgradeTable
 from mautrix.util.bridge_state import BridgeState, BridgeStateEvent, GlobalBridgeState
 from mautrix.util.program import Program
 
@@ -30,19 +32,36 @@ except ImportError:
     uvloop = None
 
 
+class HomeserverSoftware(Enum):
+    STANDARD = "standard"
+    ASMUX = "asmux"
+    HUNGRY = "hungry"
+
+    @property
+    def is_hungry(self) -> bool:
+        return self == self.HUNGRY
+
+    @property
+    def is_asmux(self) -> bool:
+        return self == self.ASMUX
+
+
 class Bridge(Program, ABC):
     db: Database
     az: AppService
-    state_store_class: Type[ASStateStore] = PgBridgeStateStore
+    state_store_class: type[ASStateStore] = PgBridgeStateStore
     state_store: ASStateStore
     upgrade_table: UpgradeTable
-    config_class: Type[br.BaseBridgeConfig]
+    config_class: type[br.BaseBridgeConfig]
     config: br.BaseBridgeConfig
-    matrix_class: Type[br.BaseMatrixHandler]
+    matrix_class: type[br.BaseMatrixHandler]
     matrix: br.BaseMatrixHandler
     repo_url: str
     markdown_version: str
-    manhole: br.manhole.ManholeState | None
+    manhole: br.commands.manhole.ManholeState | None
+    homeserver_software: HomeserverSoftware
+    beeper_network_name: str | None = None
+    beeper_service_name: str | None = None
 
     def __init__(
         self,
@@ -51,9 +70,9 @@ class Bridge(Program, ABC):
         description: str = None,
         command: str = None,
         version: str = None,
-        config_class: Type[br.BaseBridgeConfig] = None,
-        matrix_class: Type[br.BaseMatrixHandler] = None,
-        state_store_class: Type[ASStateStore] = None,
+        config_class: type[br.BaseBridgeConfig] = None,
+        matrix_class: type[br.BaseMatrixHandler] = None,
+        state_store_class: type[ASStateStore] = None,
     ) -> None:
         super().__init__(module, name, description, command, version, config_class)
         if matrix_class:
@@ -81,6 +100,16 @@ class Bridge(Program, ABC):
                 "(not needed for running the bridge)"
             ),
         )
+        self.parser.add_argument(
+            "--ignore-unsupported-database",
+            action="store_true",
+            help="Run even if the database schema is too new",
+        )
+        self.parser.add_argument(
+            "--ignore-foreign-tables",
+            action="store_true",
+            help="Run even if the database contains tables from other programs (like Synapse)",
+        )
 
     def preinit(self) -> None:
         super().preinit()
@@ -89,14 +118,26 @@ class Bridge(Program, ABC):
             sys.exit(0)
 
     def prepare(self) -> None:
+        if self.config.env:
+            self.log.debug(
+                "Loaded config overrides from environment: %s", list(self.config.env.keys())
+            )
         super().prepare()
+        try:
+            self.homeserver_software = HomeserverSoftware(self.config["homeserver.software"])
+        except Exception:
+            self.log.fatal("Invalid value for homeserver.software in config")
+            sys.exit(11)
         self.prepare_db()
         self.prepare_appservice()
         self.prepare_bridge()
 
     def prepare_config(self) -> None:
         self.config = self.config_class(
-            self.args.config, self.args.registration, self.args.base_config
+            self.args.config,
+            self.args.registration,
+            self.base_config_path,
+            env_prefix=self.module.upper(),
         )
         if self.args.generate_registration:
             self.config._check_tokens = False
@@ -119,7 +160,7 @@ class Bridge(Program, ABC):
 
     def prepare_appservice(self) -> None:
         self.make_state_store()
-        mb = 1024 ** 2
+        mb = 1024**2
         default_http_retry_count = self.config.get("homeserver.http_retry_count", None)
         if self.name not in HTTPAPI.default_ua:
             HTTPAPI.default_ua = f"{self.name}/{self.version} {HTTPAPI.default_ua}"
@@ -135,6 +176,7 @@ class Bridge(Program, ABC):
             tls_key=self.config.get("appservice.tls_key", None),
             bot_localpart=self.config["appservice.bot_username"],
             ephemeral_events=self.config["appservice.ephemeral_events"],
+            encryption_events=self.config["bridge.encryption.appservice"],
             default_ua=HTTPAPI.default_ua,
             default_http_retry_count=default_http_retry_count,
             log="mau.as",
@@ -152,19 +194,34 @@ class Bridge(Program, ABC):
             self.config["appservice.database"],
             upgrade_table=self.upgrade_table,
             db_args=self.config["appservice.database_opts"],
+            owner_name=self.name,
+            ignore_foreign_tables=self.args.ignore_foreign_tables,
         )
 
     def prepare_bridge(self) -> None:
         self.matrix = self.matrix_class(bridge=self)
 
+    def _log_db_error(self, e: Exception) -> None:
+        self.log.critical("Failed to initialize database", exc_info=e)
+        if isinstance(e, DatabaseException) and e.explanation:
+            self.log.info(e.explanation)
+        sys.exit(25)
+
     async def start_db(self) -> None:
         if hasattr(self, "db") and isinstance(self.db, Database):
             self.log.debug("Starting database...")
-            await self.db.start()
-            if isinstance(self.state_store, PgClientStateStore):
-                await self.state_store.upgrade_table.upgrade(self.db)
-            if self.matrix.e2ee:
-                self.matrix.e2ee.crypto_db.override_pool(self.db)
+            ignore_unsupported = self.args.ignore_unsupported_database
+            self.db.upgrade_table.allow_unsupported = ignore_unsupported
+            try:
+                await self.db.start()
+                if isinstance(self.state_store, PgClientStateStore):
+                    self.state_store.upgrade_table.allow_unsupported = ignore_unsupported
+                    await self.state_store.upgrade_table.upgrade(self.db)
+                if self.matrix.e2ee:
+                    self.matrix.e2ee.crypto_db.allow_unsupported = ignore_unsupported
+                    self.matrix.e2ee.crypto_db.override_pool(self.db)
+            except Exception as e:
+                self._log_db_error(e)
 
     async def stop_db(self) -> None:
         if hasattr(self, "db") and isinstance(self.db, Database):
@@ -190,6 +247,9 @@ class Bridge(Program, ABC):
                 "correct, and do they match the values in the registration?"
             )
             sys.exit(16)
+        except Exception:
+            self.log.critical("Failed to check connection to homeserver", exc_info=True)
+            sys.exit(16)
 
         await self.matrix.init_encryption()
         self.add_startup_actions(self.matrix.init_as_bot())
@@ -199,7 +259,16 @@ class Bridge(Program, ABC):
         status_endpoint = self.config["homeserver.status_endpoint"]
         if status_endpoint and await self.count_logged_in_users() == 0:
             state = BridgeState(state_event=BridgeStateEvent.UNCONFIGURED).fill()
-            await state.send(status_endpoint, self.az.as_token, self.log)
+            while not await state.send(status_endpoint, self.az.as_token, self.log):
+                await asyncio.sleep(5)
+
+    async def system_exit(self) -> None:
+        if hasattr(self, "db") and isinstance(self.db, Database):
+            self.log.debug("Stopping database due to SystemExit")
+            await self.db.stop()
+            self.log.debug("Database stopped")
+        elif getattr(self, "db", None):
+            self.log.trace("Database not started at SystemExit")
 
     async def stop(self) -> None:
         if self.manhole:

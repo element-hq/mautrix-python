@@ -2,7 +2,8 @@ import setuptools
 
 from mautrix import __version__
 
-test_dependencies = ["aiosqlite", "sqlalchemy", "asyncpg"]
+encryption_dependencies = ["python-olm", "unpaddedbase64", "pycryptodome"]
+test_dependencies = ["aiosqlite", "asyncpg", "ruamel.yaml", *encryption_dependencies]
 
 setuptools.setup(
     name="mautrix",
@@ -23,16 +24,16 @@ setuptools.setup(
     install_requires=[
         "aiohttp>=3,<4",
         "attrs>=18.1.0",
-        "yarl>=1,<2",
+        "yarl>=1.5,<2",
     ],
     extras_require={
         "detect_mimetype": ["python-magic>=0.4.15,<0.5"],
-        "lint": ["black==21.12b0", "isort"],
+        "lint": ["black~=24.1", "isort"],
         "test": ["pytest", "pytest-asyncio", *test_dependencies],
-        ':python_version < "3.8"': ["typing_extensions"],
+        "encryption": encryption_dependencies,
     },
     tests_require=test_dependencies,
-    python_requires="~=3.7",
+    python_requires="~=3.10",
 
     classifiers=[
         "Development Status :: 4 - Beta",
@@ -41,9 +42,10 @@ setuptools.setup(
         "Framework :: AsyncIO",
         "Programming Language :: Python",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.8",
-        "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
     ],
 
     package_data={

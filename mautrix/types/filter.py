@@ -1,4 +1,4 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -17,7 +17,7 @@ class EventFormat(SerializableEnum):
     Federation event format enum, as specified in the `create filter endpoint`_.
 
     .. _create filter endpoint:
-        https://matrix.org/docs/spec/client_server/r0.5.0#post-matrix-client-r0-user-userid-filter
+        https://spec.matrix.org/v1.2/client-server-api/#post_matrixclientv3useruseridfilter
     """
 
     CLIENT = "client"
@@ -30,7 +30,7 @@ class EventFilter(SerializableAttrs):
     Event filter object, as specified in the `create filter endpoint`_.
 
     .. _create filter endpoint:
-        https://matrix.org/docs/spec/client_server/r0.5.0#post-matrix-client-r0-user-userid-filter
+        https://spec.matrix.org/v1.2/client-server-api/#post_matrixclientv3useruseridfilter
     """
 
     limit: int = None
@@ -59,7 +59,7 @@ class RoomEventFilter(EventFilter, SerializableAttrs):
     Room event filter object, as specified in the `create filter endpoint`_.
 
     .. _create filter endpoint:
-        https://matrix.org/docs/spec/client_server/r0.5.0#post-matrix-client-r0-user-userid-filter
+        https://spec.matrix.org/v1.2/client-server-api/#post_matrixclientv3useruseridfilter
     """
 
     lazy_load_members: bool = False
@@ -95,7 +95,7 @@ class StateFilter(RoomEventFilter, SerializableAttrs):
     same as :class:`RoomEventFilter`.
 
     .. _create filter endpoint:
-        https://matrix.org/docs/spec/client_server/r0.5.0#post-matrix-client-r0-user-userid-filter
+        https://spec.matrix.org/v1.2/client-server-api/#post_matrixclientv3useruseridfilter
     """
 
     pass
@@ -107,7 +107,7 @@ class RoomFilter(SerializableAttrs):
     Room filter object, as specified in the `create filter endpoint`_.
 
     .. _create filter endpoint:
-        https://matrix.org/docs/spec/client_server/r0.5.0#post-matrix-client-r0-user-userid-filter
+        https://spec.matrix.org/v1.2/client-server-api/#post_matrixclientv3useruseridfilter
     """
 
     not_rooms: List[RoomID] = None
@@ -144,7 +144,7 @@ class Filter(SerializableAttrs):
     Base filter object, as specified in the `create filter endpoint`_.
 
     .. _create filter endpoint:
-        https://matrix.org/docs/spec/client_server/r0.5.0#post-matrix-client-r0-user-userid-filter
+        https://spec.matrix.org/v1.2/client-server-api/#post_matrixclientv3useruseridfilter
     """
 
     event_fields: List[str] = None

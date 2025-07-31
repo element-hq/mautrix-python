@@ -1,4 +1,4 @@
-# Copyright (c) 2021 Tulir Asokan
+# Copyright (c) 2022 Tulir Asokan
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -39,6 +39,8 @@ class SemiAbstractEntity(AbstractEntity, ABC):
         entity.offset += offset
         if entity.offset < 0:
             entity.length += entity.offset
+            if entity.length < 0:
+                return None
             entity.offset = 0
         elif entity.offset > max_length > -1:
             return None
